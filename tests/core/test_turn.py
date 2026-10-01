@@ -1,22 +1,38 @@
-"""WP4 acceptance: `uv run pytest tests/core/test_turn.py`.
+"""M1 WP4 and M2 WP5 acceptance: `uv run pytest tests/core/test_turn.py`.
 
 Covers the conversation service (`mana_leak_core.conversations`) and the turn
 orchestrator (`mana_leak_core.orchestrator.process_turn`) against
 `docs/contracts.md` -> Core service interfaces, Turn orchestration, Streaming
-events, Conversation behaviour, and PRD AC-1, AC-4, AC-5, AC-7, AC-10, AC-11.
+events, Conversation behaviour, M1's PRD AC-1, AC-4, AC-5, AC-7, AC-10,
+AC-11, and M2's PRD AC-3 (code half), AC-4, AC-5, AC-8, AC-12.
 
 Everything except the one `live` test replaces the model gateway's
 `complete()` with a scripted fake; persistence, event ordering, the
 conversation lock, and the turn deadline are all exercised for real against
 the Compose `mana_leak_test` database (the `db` fixture, `tests/conftest.py`).
+
+The M2 turn-trace section at the bottom drives turns in through the FastAPI
+route and `sse_stream` rather than iterating `process_turn` directly (PRD §8;
+plan -> WP5 checklist): which task drives the turn generator decides whether
+OpenTelemetry's context survives it, so the adapter is part of what those
+tests assert. Spans go to the in-memory exporter from `tests/core/conftest.py`
+-- except in the two degradation tests, which deliberately build a real
+client against a dead or hung local port.
 """
 
 import asyncio
+import json
+import logging
+import socket
+import threading
+import time
 import uuid
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
-from mana_leak_core import conversations, gateway, orchestrator
+from mana_leak_api.sse import sse_stream
+from mana_leak_core import conversations, gateway, orchestrator, tracing
 from mana_leak_core import db as db_module
 from mana_leak_core.contracts.enums import AuditEventType, MessageRole, Route
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
@@ -30,6 +46,7 @@ from mana_leak_core.contracts.events import (
 from mana_leak_core.db.models import AuditEvent
 from mana_leak_core.gateway import ModelChunk
 from mana_leak_core.settings import Settings, get_settings
+from pydantic import SecretStr
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -62,7 +79,13 @@ async def turn_db(db, _migrated_test_db: str | None, monkeypatch: pytest.MonkeyP
 class FakeGateway:
     """Scripted stand-in for `mana_leak_core.gateway.complete`. Records the
     messages it was called with and replays chunks, optionally hanging after
-    them (to exercise the turn deadline and client disconnect) or failing."""
+    them (to exercise the turn deadline and client disconnect) or failing.
+
+    It opens a `tracing.record_generation` observation in the same place the
+    real gateway does -- inside the streaming generator's own body, not in
+    `complete()` -- so the orchestrator's turn trace can be asserted for
+    real (AC-4) without depending on the gateway's own M2 changes. With
+    tracing disabled (every other test here) that call is a no-op."""
 
     def __init__(
         self,
@@ -80,14 +103,18 @@ class FakeGateway:
         self.calls.append({"messages": list(messages), **kwargs})
         if self.raises is not None:
             raise self.raises
-        return self._stream()
+        return self._stream(list(messages), kwargs)
 
-    async def _stream(self):
-        for delta in self.deltas:
-            yield ModelChunk(delta=delta)
-        if self.hang_after_deltas:
-            await asyncio.sleep(3600)
-        yield ModelChunk(delta="", finish_reason="stop")
+    async def _stream(self, messages: list[Any], kwargs: dict[str, Any]):
+        with tracing.record_generation(
+            kwargs.get("trace"), model=kwargs.get("model", "fake-model"), input=messages
+        ) as generation:
+            for delta in self.deltas:
+                yield ModelChunk(delta=delta)
+            if self.hang_after_deltas:
+                await asyncio.sleep(3600)
+            yield ModelChunk(delta="", finish_reason="stop")
+            generation.update(output="".join(self.deltas))
 
 
 @pytest.fixture
@@ -699,6 +726,308 @@ async def test_the_model_call_cap_ends_the_turn_with_model_limit_exceeded(
     assert [row.event_type for row in rows] == [AuditEventType.limit_reached.value]
     assert rows[0].conversation_id == conversation_id
     assert rows[0].details == {"limit": "model_calls_max", "value": 0}
+
+
+# --- process_turn: Langfuse turn trace (M2; AC-3, AC-4, AC-5, AC-8, AC-12) -----
+
+
+#: `propagate_attributes(session_id=...)`'s span attribute, the key
+#: `start_turn_trace`'s `metadata={"route": ...}` lands under, and the
+#: observation output -- all three the Langfuse SDK's own names, pinned here
+#: so an SDK rename fails loudly instead of silently dropping the session
+#: grouping AC-3 depends on.
+SESSION_ATTRIBUTE = "session.id"
+ROUTE_ATTRIBUTE = "langfuse.observation.metadata.route"
+OUTPUT_ATTRIBUTE = "langfuse.observation.output"
+
+
+@pytest.fixture
+def hung_langfuse() -> Iterator[str]:
+    """A local TCP listener that accepts connections and never answers: the
+    AC-12 hang, which a stopped port (AC-5) does not reproduce because that
+    one is refused immediately."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    accepted: list[socket.socket] = []
+
+    def _accept() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            accepted.append(conn)
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}"
+    finally:
+        server.close()
+        for conn in accepted:
+            conn.close()
+
+
+@pytest.fixture
+def real_langfuse_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
+    """Enable tracing with a *real* SDK client and a real OTLP exporter
+    pointed at `base_url` -- no in-memory exporter, because what AC-5/AC-12
+    are about is the network the exporter would use. The keys are unique per
+    client: the SDK keys its internal resource manager by `public_key` and
+    silently reuses the first client registered under one."""
+    built: list[Any] = []
+
+    def _enable(base_url: str) -> None:
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", f"pk-lf-{uuid.uuid4().hex}")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", f"sk-lf-{uuid.uuid4().hex}")
+        monkeypatch.setenv("LANGFUSE_HOST", base_url)
+        get_settings.cache_clear()
+        tracing._get_client.cache_clear()
+        client = tracing._get_client()
+        assert client is not None, "tracing should be enabled for this test"
+        built.append(client)
+
+    yield _enable
+    for client in built:
+        client.shutdown()
+    get_settings.cache_clear()
+
+
+def _parse_sse(raw: str) -> list[tuple[str, dict[str, Any]]]:
+    """`event: <type>\\ndata: <json>\\n\\n` -> `[(type, data), ...]`, skipping
+    `: ping` comments (contracts.md -> SSE mapping)."""
+    events: list[tuple[str, dict[str, Any]]] = []
+    event_type: str | None = None
+    for line in raw.split("\n"):
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: ") and event_type is not None:
+            events.append((event_type, json.loads(line.removeprefix("data: "))))
+            event_type = None
+    return events
+
+
+async def _sse_turn(
+    conversation_id: uuid.UUID, content: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """One turn through `sse.py`'s encoder, driven the way the API drives it
+    -- not by iterating `process_turn` directly (PRD §8, plan -> WP5
+    checklist).
+
+    Which task drives the turn generator is part of what is under test: an
+    OpenTelemetry context attached in one task and detached in another is
+    exactly the failure AC-4's "no tracing error is logged" rules out, and it
+    is invisible when a test iterates the orchestrator itself.
+
+    This mirrors the router: the first `__anext__` is pulled by the caller so
+    a pre-stream `ManaLeakError` (conflict, or AC-8's secret check) maps to
+    an HTTP status instead of an in-stream event. That split is itself the
+    bug WP6 fixes by starting `sse_stream`'s producer task first; when it
+    lands, this helper follows the new call shape.
+    """
+    agen = orchestrator.process_turn(conversation_id, content)
+    first_event = await anext(agen)
+    raw = b"".join([chunk async for chunk in sse_stream(agen, first_event)])
+    return _parse_sse(raw.decode())
+
+
+def _tracing_settings(**overrides: Any) -> Settings:
+    base = get_settings()
+    return Settings(
+        **{**base.model_dump(), "openrouter_api_key": base.openrouter_api_key},
+    ).model_copy(update=overrides)
+
+
+async def test_the_turn_trace_nests_the_model_call_as_its_generation(
+    turn_db, fake_gateway, span_capture
+) -> None:
+    """AC-4: one turn-level trace carrying the route, with the model call as
+    a child generation of it -- never a second root span."""
+    fake_gateway(deltas=("Mana ", "Leak."))
+    conversation_id = await _new_conversation()
+
+    events = await _sse_turn(conversation_id, "what does mana leak do?")
+
+    assert [name for name, _ in events] == [
+        "message_start",
+        "text_delta",
+        "text_delta",
+        "final",
+        "message_end",
+    ]
+    turn_id = uuid.UUID(events[0][1]["turn_id"])
+
+    spans = span_capture.finished_spans()
+    assert sorted(span.name for span in spans) == sorted(
+        [str(turn_id), get_settings().chat_model]
+    ), f"expected exactly a turn span and its generation, got {[s.name for s in spans]}"
+    turn_span = span_capture.span_named(str(turn_id))
+    generation = span_capture.span_named(get_settings().chat_model)
+
+    # The turn span's only ancestor is the synthetic context `start_turn_trace`
+    # uses to pin the OTel trace id to `turn_id`; it is the trace's own root
+    # observation, and the generation hangs off it rather than opening a
+    # second root (AC-4).
+    assert turn_span.parent is not None
+    assert turn_span.parent.trace_id == turn_span.context.trace_id
+    assert generation.parent is not None
+    assert generation.parent.span_id == turn_span.context.span_id
+    # NFR-3: the Langfuse trace id *is* the persisted `turn_id`, on both spans.
+    assert format(turn_span.context.trace_id, "032x") == turn_id.hex
+    assert format(generation.context.trace_id, "032x") == turn_id.hex
+    assert turn_span.attributes[SESSION_ATTRIBUTE] == str(conversation_id)
+    assert turn_span.attributes[ROUTE_ATTRIBUTE] == Route.other.value
+    assert turn_span.attributes[OUTPUT_ATTRIBUTE] == "Mana Leak."
+
+
+async def test_a_traced_turn_logs_no_opentelemetry_context_error(
+    turn_db, fake_gateway, span_capture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-4's second half (PRD §8: "no tracing error is logged").
+
+    The turn-level `with` is entered on the generator's first `__anext__()`
+    and left on its last, so whoever pulls the first event must also pull the
+    rest: OpenTelemetry's `detach` compares the token's context identity and
+    logs `Failed to detach context` when a `with` block is entered in one
+    task and left in another. Verified reproducible both ways in isolation,
+    so this assertion is a real guard, not a formality.
+
+    It fails until the SSE adapter starts its producer task before the first
+    event (plan -> WP6 checklist, F1): today the route pulls `message_start`
+    in the request task and the producer task pulls the rest, which splits
+    this `with` block across two contexts. Nothing in `orchestrator.py` can
+    fix that from its side -- a turn generator cannot choose its driver.
+    """
+    fake_gateway(deltas=("Mana ", "Leak."))
+    conversation_id = await _new_conversation()
+
+    with caplog.at_level(logging.ERROR, logger="opentelemetry.context"):
+        events = await _sse_turn(conversation_id, "what does mana leak do?")
+
+    assert [name for name, _ in events][-1] == "message_end"
+    assert [record.getMessage() for record in caplog.records] == []
+
+
+async def test_each_turn_is_its_own_trace_under_one_session(
+    turn_db, fake_gateway, span_capture
+) -> None:
+    """AC-3's code half: one trace per turn, all under a session named by the
+    conversation id."""
+    fake_gateway(deltas=("ok",))
+    conversation_id = await _new_conversation()
+
+    first = await _sse_turn(conversation_id, "first question")
+    second = await _sse_turn(conversation_id, "second question")
+
+    turn_ids = [uuid.UUID(events[0][1]["turn_id"]) for events in (first, second)]
+    assert turn_ids[0] != turn_ids[1]
+    turn_spans = [span_capture.span_named(str(turn_id)) for turn_id in turn_ids]
+
+    assert [format(span.context.trace_id, "032x") for span in turn_spans] == [
+        turn_id.hex for turn_id in turn_ids
+    ]
+    assert {span.attributes[SESSION_ATTRIBUTE] for span in turn_spans} == {str(conversation_id)}
+
+
+async def test_the_turn_trace_records_partial_text_when_the_turn_errors(
+    turn_db, fake_gateway, span_capture
+) -> None:
+    """The single `turn_span.update(output=...)` covers the failure branches
+    too: a turn that ends in an `error` event still records what was
+    persisted, and still produces exactly one trace."""
+    fake_gateway(raises=ManaLeakError(ErrorCode.timeout, "model call timed out", retryable=True))
+    conversation_id = await _new_conversation()
+
+    events = await _sse_turn(conversation_id, "what does mana leak do?")
+
+    assert [name for name, _ in events] == ["message_start", "error", "message_end"]
+    turn_id = uuid.UUID(events[0][1]["turn_id"])
+    turn_span = span_capture.span_named(str(turn_id))
+    assert turn_span.attributes[OUTPUT_ATTRIBUTE] == ""
+
+
+async def test_a_message_containing_a_langfuse_secret_is_never_traced(
+    turn_db, fake_gateway, span_capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8/NFR-2: the gateway's generic secret check runs *before* the turn
+    trace opens, so a message carrying the configured `LANGFUSE_SECRET_KEY`
+    fails the turn closed -- no span at all, not a scrubbed one.
+
+    The error is raised on the generator's first `__anext__()`, so it reaches
+    the adapter as an HTTP error (`errors.py` maps `internal_error` to 500),
+    never as an in-stream `error` event.
+    """
+    secret = "sk-lf-5f0c2a9e4d7b41c8"
+    monkeypatch.setattr(
+        orchestrator,
+        "get_settings",
+        lambda: _tracing_settings(langfuse_secret_key=SecretStr(secret)),
+    )
+    fake = fake_gateway(deltas=("never reached",))
+    conversation_id = await _new_conversation()
+
+    with pytest.raises(ManaLeakError) as excinfo:
+        await _sse_turn(conversation_id, f"is {secret} a good card?")
+
+    assert excinfo.value.code == ErrorCode.internal_error
+    assert secret not in excinfo.value.message
+    assert span_capture.finished_spans() == []  # no trace was ever opened
+    assert fake.calls == []  # and no model call was attempted
+    assert (await conversations.get_conversation(conversation_id)).messages == []
+
+
+def _comparable(events: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+    """SSE events with the per-turn identifiers dropped, so two turns of the
+    same conversation can be compared for sequence and content."""
+    volatile = ("conversation_id", "turn_id", "message_id")
+    return [
+        (name, {k: v for k, v in payload.items() if k not in volatile}) for name, payload in events
+    ]
+
+
+async def _timed_turn(conversation_id: uuid.UUID) -> tuple[list[Any], float]:
+    started = time.monotonic()
+    events = await _sse_turn(conversation_id, "what does mana leak do?")
+    return events, time.monotonic() - started
+
+
+async def test_an_unreachable_langfuse_leaves_the_turn_identical(
+    turn_db, fake_gateway, real_langfuse_client
+) -> None:
+    """AC-5/FR-6/NFR-1: Langfuse stopped (connection refused) changes neither
+    the SSE sequence, the answer, nor the turn's timing."""
+    fake_gateway(deltas=("Mana ", "Leak."))
+    baseline_events, baseline_elapsed = await _timed_turn(await _new_conversation())
+
+    # A port nothing is listening on: `start_turn_trace` must not even try.
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    stopped_port = closed.getsockname()[1]
+    closed.close()
+    real_langfuse_client(f"http://127.0.0.1:{stopped_port}")
+
+    events, elapsed = await _timed_turn(await _new_conversation())
+
+    assert _comparable(events) == _comparable(baseline_events)
+    assert elapsed < baseline_elapsed + 2.0, f"tracing added {elapsed - baseline_elapsed:.2f}s"
+
+
+async def test_a_hung_langfuse_leaves_the_turn_identical(
+    turn_db, fake_gateway, real_langfuse_client, hung_langfuse: str
+) -> None:
+    """AC-12/NFR-1: a Langfuse that accepts the connection and never answers
+    is bounded the same way, because span creation is purely in-memory --
+    `orchestrator.py` adds no timeout of its own for it."""
+    fake_gateway(deltas=("Mana ", "Leak."))
+    baseline_events, baseline_elapsed = await _timed_turn(await _new_conversation())
+
+    real_langfuse_client(hung_langfuse)
+
+    events, elapsed = await _timed_turn(await _new_conversation())
+
+    assert _comparable(events) == _comparable(baseline_events)
+    assert elapsed < baseline_elapsed + 2.0, f"tracing added {elapsed - baseline_elapsed:.2f}s"
 
 
 # --- Live (AC-1 through the real gateway; CHAT_MODEL) --------------------------

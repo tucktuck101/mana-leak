@@ -19,7 +19,7 @@ FR-5):
    `other` route);
 8. emit `final`, then `message_end`.
 
-Three behaviours the adapters depend on:
+Four behaviours the adapters depend on:
 
 - **Conflict.** A per-conversation in-process lock is taken on the
   generator's first `__anext__()` and raises `ManaLeakError(conflict)`
@@ -38,6 +38,19 @@ Three behaviours the adapters depend on:
 - **Cancellation.** A client disconnect closes the generator; partial
   assistant text is persisted under `asyncio.shield` with `payload.error`
   (PRD AC-7, AC-10; `contracts.md` -> SSE mapping -> Client disconnect).
+- **Turn trace.** M2 wraps the whole of `_run_turn` in one
+  `tracing.start_turn_trace(...)` span (FR-4): the Langfuse trace id *is*
+  `turn_id`, the session is `conversation_id`, and the gateway's generation
+  nests under it ambiently, through OpenTelemetry's contextvar, with no span
+  handle threaded between the modules. That nesting is only correct while
+  one task drives this generator from its first `__anext__()` to its last:
+  a contextvar attached inside a generator body survives that generator's
+  own `yield`s (verified), but a `with` block entered in one task and left
+  in another makes OpenTelemetry log `Failed to detach context` (also
+  verified) -- which is why the SSE adapter starts its producer task before
+  the first event rather than after it. Tracing never changes a turn's
+  outcome or timing: `tracing.py` guarantees its calls never raise and never
+  touch the network (PRD AC-5, AC-6, AC-12, NFR-1).
 """
 
 import asyncio
@@ -65,8 +78,9 @@ from mana_leak_core.contracts.events import (
     TurnEvent,
 )
 from mana_leak_core.conversations import ModelContext, append_message, build_context
-from mana_leak_core.gateway import complete, start_turn_budget
+from mana_leak_core.gateway import check_no_secrets, complete, start_turn_budget
 from mana_leak_core.settings import Settings, get_settings
+from mana_leak_core.tracing import TraceContext, start_turn_trace
 
 logger = logging.getLogger(__name__)
 
@@ -260,71 +274,93 @@ async def process_turn(
 async def _run_turn(
     state: _TurnState, user_message: str, settings: Settings
 ) -> AsyncIterator[TurnEvent]:
+    # NFR-2/AC-8: fail closed *before* anything about this turn is traced.
+    # The gateway runs the same check on every outbound model call; running
+    # it here too means a user message carrying a configured secret raises
+    # on this generator's first `__anext__()` -- no `message_start`, no
+    # persisted message, and no turn trace ever opened -- instead of being
+    # scrubbed and carried on with (plan -> WP5 checklist, F8).
+    check_no_secrets([{"role": "user", "content": user_message}], settings)
+
     deadline = asyncio.get_running_loop().time() + settings.turn_timeout_s
     ids = {"conversation_id": state.conversation_id, "turn_id": state.turn_id}
+    # One trace per turn (FR-4). M2 has no router, so the route is always
+    # `other`, and there is no prompt-versioning scheme yet. The same object
+    # is handed to the gateway so its generation nests under this trace.
+    trace = TraceContext(
+        conversation_id=state.conversation_id,
+        turn_id=state.turn_id,
+        route=Route.other,
+        prompt_version=None,
+    )
 
-    # Step 2. The budget is reset before any model call in this turn
-    # (plan -> Shared contracts: `process_turn` calls it once at turn start).
-    # The ids go with it so the gateway's own `limit_reached` rows (per-call
-    # timeout, model-call cap) name the turn they belong to, like this
-    # module's turn-deadline row does.
-    start_turn_budget(conversation_id=state.conversation_id, turn_id=state.turn_id)
-    # Persisted before `message_start`: a failure here (unknown conversation,
-    # database down) must reach the adapter as an HTTP error, not as an
-    # in-stream `error` event (`contracts.md` -> Conversation behaviour).
-    await append_message(state.conversation_id, state.turn_id, MessageRole.user, user_message)
-    yield MessageStart(**ids, message_id=state.assistant_message_id)
+    with start_turn_trace(trace, input=user_message) as turn_span:
+        # Step 2. The budget is reset before any model call in this turn
+        # (plan -> Shared contracts: `process_turn` calls it once at turn start).
+        # The ids go with it so the gateway's own `limit_reached` rows (per-call
+        # timeout, model-call cap) name the turn they belong to, like this
+        # module's turn-deadline row does.
+        start_turn_budget(conversation_id=state.conversation_id, turn_id=state.turn_id)
+        # Persisted before `message_start`: a failure here (unknown conversation,
+        # database down) must reach the adapter as an HTTP error, not as an
+        # in-stream `error` event (`contracts.md` -> Conversation behaviour).
+        await append_message(state.conversation_id, state.turn_id, MessageRole.user, user_message)
+        yield MessageStart(**ids, message_id=state.assistant_message_id)
 
-    try:
-        # Steps 3-5: screening is M8 (every valid message is `clear`) and M1
-        # has no router -- the route is always `other`.
-        context = await _bounded(build_context(state.conversation_id), deadline)
-        stream = await _bounded(
-            complete(
-                _model_messages(context, settings),
-                model=settings.chat_model,
-                stream=True,
-                max_tokens=settings.max_tokens,
-            ),
-            deadline,
-        )
-        # Step 6.
-        async with aclosing(stream):
-            chunks = stream.__aiter__()
-            while True:
-                try:
-                    chunk = await _bounded(anext(chunks), deadline)
-                except StopAsyncIteration:
-                    break
-                if chunk.delta:
-                    state.text_parts.append(chunk.delta)
-                    yield TextDelta(**ids, delta=chunk.delta)
-        # Step 7, before `final` (`contracts.md` -> Conversation behaviour).
-        await _bounded(_persist_assistant(state, None), deadline)
-        # Step 8. `other`-route answers have `result = None`.
-        yield Final(**ids, route=Route.other, text=state.text, result=None)
-    except TimeoutError:
-        await emit_audit_event(
-            AuditEventType.limit_reached,
-            Severity.warning,
-            conversation_id=state.conversation_id,
-            turn_id=state.turn_id,
-            details={"limit": "turn_timeout_s", "value": settings.turn_timeout_s},
-        )
-        await _persist_on_cancel(state, _TURN_DEADLINE)
-        yield ErrorEvent(**ids, error=_TURN_DEADLINE)
-    except ManaLeakError as exc:
-        # Already-typed failures, including the gateway's own per-call
-        # timeout and cap (both audited by the gateway).
-        info = _error_info(exc)
-        await _persist_on_cancel(state, info)
-        yield ErrorEvent(**ids, error=info)
-    except Exception:
-        logger.exception("turn %s failed", state.turn_id)
-        info = ErrorInfo(code=ErrorCode.internal_error, message="the turn failed")
-        await _persist_on_cancel(state, info)
-        yield ErrorEvent(**ids, error=info)
-    yield MessageEnd(**ids)
+        try:
+            # Steps 3-5: screening is M8 (every valid message is `clear`) and M1
+            # has no router -- the route is always `other`.
+            context = await _bounded(build_context(state.conversation_id), deadline)
+            stream = await _bounded(
+                complete(
+                    _model_messages(context, settings),
+                    model=settings.chat_model,
+                    stream=True,
+                    max_tokens=settings.max_tokens,
+                    trace=trace,
+                ),
+                deadline,
+            )
+            # Step 6.
+            async with aclosing(stream):
+                chunks = stream.__aiter__()
+                while True:
+                    try:
+                        chunk = await _bounded(anext(chunks), deadline)
+                    except StopAsyncIteration:
+                        break
+                    if chunk.delta:
+                        state.text_parts.append(chunk.delta)
+                        yield TextDelta(**ids, delta=chunk.delta)
+            # Step 7, before `final` (`contracts.md` -> Conversation behaviour).
+            await _bounded(_persist_assistant(state, None), deadline)
+            # Step 8. `other`-route answers have `result = None`.
+            yield Final(**ids, route=Route.other, text=state.text, result=None)
+        except TimeoutError:
+            await emit_audit_event(
+                AuditEventType.limit_reached,
+                Severity.warning,
+                conversation_id=state.conversation_id,
+                turn_id=state.turn_id,
+                details={"limit": "turn_timeout_s", "value": settings.turn_timeout_s},
+            )
+            await _persist_on_cancel(state, _TURN_DEADLINE)
+            yield ErrorEvent(**ids, error=_TURN_DEADLINE)
+        except ManaLeakError as exc:
+            # Already-typed failures, including the gateway's own per-call
+            # timeout and cap (both audited by the gateway).
+            info = _error_info(exc)
+            await _persist_on_cancel(state, info)
+            yield ErrorEvent(**ids, error=info)
+        except Exception:
+            logger.exception("turn %s failed", state.turn_id)
+            info = ErrorInfo(code=ErrorCode.internal_error, message="the turn failed")
+            await _persist_on_cancel(state, info)
+            yield ErrorEvent(**ids, error=info)
+        # Whatever the branch above, `state.text` is what was persisted, so
+        # one update covers success, turn deadline, and error alike.
+        turn_span.update(output=state.text)
+        yield MessageEnd(**ids)
 
 
 async def _bounded[T](awaitable: Awaitable[T], deadline: float) -> T:

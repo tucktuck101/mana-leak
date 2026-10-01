@@ -256,7 +256,7 @@ def test_settings_loads_required_fields_and_limit_defaults(tmp_path, monkeypatch
         "CHAT_MODEL=openrouter/test/model\n"
     )
     settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
-    assert settings.database_url.endswith("/mana_leak")
+    assert settings.database_url.get_secret_value().endswith("/mana_leak")
     assert settings.openrouter_api_key.get_secret_value() == "test-key"
     assert settings.chat_model == "openrouter/test/model"
     assert settings.log_level == "INFO"
@@ -287,7 +287,7 @@ def test_settings_never_leaks_secret_in_repr_or_str(tmp_path, monkeypatch) -> No
     _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "DATABASE_URL=postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak\n"
+        "DATABASE_URL=postgresql+psycopg://mana_leak:super-secret-db-pw@localhost:5432/mana_leak\n"
         "OPENROUTER_API_KEY=sk-or-super-secret-value\n"
         "CHAT_MODEL=openrouter/test/model\n"
     )
@@ -295,6 +295,9 @@ def test_settings_never_leaks_secret_in_repr_or_str(tmp_path, monkeypatch) -> No
     assert "sk-or-super-secret-value" not in repr(settings)
     assert "sk-or-super-secret-value" not in str(settings.openrouter_api_key)
     assert str(settings.openrouter_api_key) == "**********"
+    assert "super-secret-db-pw" not in repr(settings)
+    assert "super-secret-db-pw" not in str(settings.database_url)
+    assert str(settings.database_url) == "**********"
 
 
 def test_settings_requires_core_fields(tmp_path, monkeypatch) -> None:

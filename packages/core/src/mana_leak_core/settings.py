@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
 
     # Required (contracts.md -> Configuration).
-    database_url: str
+    database_url: SecretStr
     openrouter_api_key: SecretStr
     chat_model: str
 

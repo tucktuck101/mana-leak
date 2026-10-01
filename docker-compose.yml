@@ -23,9 +23,11 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    env_file: .env
     environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      CHAT_MODEL: ${CHAT_MODEL}
       DATABASE_URL: postgresql+psycopg://mana_leak:${MANA_LEAK_DB_PASSWORD}@postgres:5432/mana_leak
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Overrides the host-default LANGFUSE_HOST (unset in .env, so it falls
       # back to the Settings class's http://localhost:3001) with the
       # self-hosted langfuse-web container's URL for the M2 Langfuse stack

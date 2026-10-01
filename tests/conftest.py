@@ -36,7 +36,7 @@ def _test_database_url() -> str:
     probe/connection in this fixture fail silently (DB-backed tests always
     skipped instead of running) - a bug fixed by WP2 (`AGENTS.md` SS56).
     """
-    url = make_url(get_settings().database_url).set(database="mana_leak_test")
+    url = make_url(get_settings().database_url.get_secret_value()).set(database="mana_leak_test")
     return url.render_as_string(hide_password=False)
 
 

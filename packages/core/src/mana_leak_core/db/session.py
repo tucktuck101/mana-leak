@@ -28,7 +28,7 @@ def get_engine() -> AsyncEngine:
     pool; tests that need a different `database_url` call `get_engine.cache_clear()`
     (and `get_settings.cache_clear()`) after changing the environment.
     """
-    return create_async_engine(get_settings().database_url, pool_pre_ping=True)
+    return create_async_engine(get_settings().database_url.get_secret_value(), pool_pre_ping=True)
 
 
 @lru_cache

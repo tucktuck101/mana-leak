@@ -77,6 +77,7 @@ def test_error_code_is_the_m1_reachable_subset() -> None:
         "conflict",
         "dependency_unavailable",
         "timeout",
+        "model_limit_exceeded",
         "internal_error",
     }
 

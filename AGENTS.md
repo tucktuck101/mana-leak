@@ -1335,6 +1335,28 @@ For each finding:
 
 ---
 
+# 49a. Review gates (review–repair cycle)
+
+Before a phase boundary (design docs → PRDs, PRD → PRD plan, PRD plan → implementation, milestone → Complete), run a review gate:
+
+```text
+independent adversarial review (a different model/agent from the author)
+→ triage findings
+→ repair
+→ re-review against the SAME criteria
+→ repeat, maximum 5 rounds
+```
+
+Triage rules:
+
+- **Technical findings** (contradictions, stale references, broken contracts, missing fields, inconsistent limits, wrong file paths, unverified external assumptions that can be checked): the agent fixes them directly.
+- **Product-behaviour findings** (what Mana Leak does for the user, scope, rulings/clarification semantics, safeguards policy, what is in or out of a milestone) and **architectural findings** (component boundaries, technology choices, data ownership, interface shape, deployment topology): STOP and ask the user. Do not continue the cycle on that finding until the user decides.
+- Reviewer findings are verified before fixing (§49); rejected findings are recorded with the reason.
+
+The gate passes when a round returns 0 BLOCKER and 0 MAJOR. If round 5 still has BLOCKER/MAJOR findings, stop and report them to the user rather than proceeding. Each round's report and the repairs made are summarised in the commit message or the relevant PRD/plan, not in a separate memory file.
+
+---
+
 # 50. Git discipline
 
 Prefer:

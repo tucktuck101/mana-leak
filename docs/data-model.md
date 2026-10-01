@@ -24,7 +24,7 @@ erDiagram
     conversation ||--o{ message : contains
     conversation ||--o{ judge_session : "has (≤1 active)"
     conversation ||--o{ ruling : produces
-    judge_session |o--o| ruling : "final ruling"
+    judge_session ||--o| ruling : "final ruling (ruling.judge_session_id)"
 
     %% Evaluation data
     eval_case ||--o{ eval_run : "executed as"
@@ -207,11 +207,12 @@ Unique: (`conversation_id`, `seq`).
 | `missing_facts` | jsonb | no | Array of strings: facts still needed |
 | `clarification_count` | smallint | no | Default 0; `CHECK (clarification_count BETWEEN 0 AND 3)` |
 | `card_oracle_ids` | uuid[] | no | Cards identified for the question so far |
-| `ruling_id` | uuid | yes | FK → `ruling.id`, `ON DELETE SET NULL`; set when the session ends with a ruling |
 | `created_at`, `updated_at` | timestamptz | no | |
 | `closed_at` | timestamptz | yes | Set on any terminal status |
 
 One active session per conversation: partial unique index on (`conversation_id`) `WHERE status = 'active'`.
+
+A session's final ruling is the `ruling` row whose `judge_session_id` points to it; `judge_session` holds no reference back to `ruling`.
 
 Transitions (`active → completed | exhausted | abandoned`) and the 3-round limit are enforced in code; the `CHECK` is a backstop.
 
@@ -223,7 +224,7 @@ The structured judge output. It holds the displayed explanation and *references*
 |---|---|---|---|
 | `id` | uuid | PK | |
 | `conversation_id` | uuid | no | FK → `conversation.id`, `ON DELETE CASCADE` |
-| `judge_session_id` | uuid | yes | FK → `judge_session.id`, `ON DELETE SET NULL`; null for rulings without clarification |
+| `judge_session_id` | uuid | yes | FK → `judge_session.id`, `ON DELETE SET NULL`; unique when non-null (at most one final ruling per session); null for rulings without clarification |
 | `turn_id` | uuid | no | Turn that produced the ruling |
 | `question` | text | no | Question as ruled on (original question plus established facts) |
 | `status` | text | no | `legal`, `illegal`, `conditional`, `insufficient_information` |
@@ -330,8 +331,7 @@ Critical events kept locally so behaviour can be reconstructed when Langfuse is 
 | `conversation` → `ruling` | 1:N | cascade |
 | `conversation` → `judge_session` | 1:N overall, 0:1 active | cascade |
 | `conversation` → `audit_event` | 1:N | cascade |
-| `judge_session` → `ruling` (final) | 0:1 | ruling delete sets `judge_session.ruling_id` null |
-| `ruling` → `judge_session` | N:0..1 | session delete sets `ruling.judge_session_id` null |
+| `judge_session` → `ruling` (final) | 1 → 0..1, via `ruling.judge_session_id` (unique when non-null) | session delete sets `ruling.judge_session_id` null |
 | `combo` ↔ `card` via `combo_card` | N:M | combo delete cascades to `combo_card`; card delete sets `combo_card.oracle_id` null |
 | `eval_case` → `eval_run` | 1:N | restrict (runs are history) |
 
@@ -357,6 +357,7 @@ Only these indexes are required. Add more only if a measured query needs them.
 | `message` | unique (`conversation_id`, `seq`) | Ordered history |
 | `conversation` | btree `updated_at DESC` | Recent conversations list |
 | `judge_session` | partial unique (`conversation_id`) `WHERE status='active'` | One active session; fast active lookup |
+| `ruling` | unique (`judge_session_id`) `WHERE judge_session_id IS NOT NULL` | At most one final ruling per session; session → ruling lookup |
 | `ruling` | btree (`conversation_id`, `created_at`) | Rulings per conversation |
 | `eval_case` | btree (`suite`, `split`) | Select suite |
 | `eval_run` | btree (`run_group_id`); btree (`eval_case_id`, `started_at`) | Run reports, case history |
@@ -372,6 +373,7 @@ Commander legality is not indexed: it is a low-cardinality filter applied togeth
 |---|---|
 | Upstream IDs unique within source | PKs on `card.oracle_id`, `combo.id`; unique on `rule_chunk` identity; PK on `eval_case.id` |
 | One active Judge session per conversation | Partial unique index |
+| At most one ruling per Judge session | Partial unique index on `ruling.judge_session_id` where non-null |
 | `clarification_count` between 0 and 3 | `CHECK` (backstop); code enforces the limit |
 | `ruling.status` ∈ {`legal`, `illegal`, `conditional`, `insufficient_information`} | `CHECK` |
 | `judge_session.status` ∈ {`active`, `completed`, `exhausted`, `abandoned`} | `CHECK` |
@@ -456,8 +458,8 @@ Dependency note: Alembic is not yet declared in `packages/core/pyproject.toml`. 
 | `rule_chunk` | Indexed rules + embeddings | `id` | — | (`rules_version`, `rule_number`, `part`) | `rule_number`, `subrule_numbers`, `search_tsv` |
 | `conversation` | Chat session / Langfuse session | `id` | — | — | `updated_at` |
 | `message` | Conversation messages | `id` | `conversation_id` | (`conversation_id`, `seq`) | — |
-| `judge_session` | Clarification workflow state | `id` | `conversation_id`, `ruling_id` | partial (`conversation_id`) where active | — |
-| `ruling` | Structured judge output | `id` | `conversation_id`, `judge_session_id` | — | (`conversation_id`, `created_at`) |
+| `judge_session` | Clarification workflow state | `id` | `conversation_id` | partial (`conversation_id`) where active | — |
+| `ruling` | Structured judge output | `id` | `conversation_id`, `judge_session_id` (nullable) | partial (`judge_session_id`) where non-null | (`conversation_id`, `created_at`) |
 | `eval_case` | Frozen eval input (copy of fixtures) | `id` (text) | — | `id` | (`suite`, `split`) |
 | `eval_run` | Append-only eval results | `id` | `eval_case_id` | — | `run_group_id`, (`eval_case_id`, `started_at`) |
 | `audit_event` | Critical local events | `id` | `conversation_id` (nullable) | — | (`conversation_id`, `created_at`), (`event_type`, `created_at`) |

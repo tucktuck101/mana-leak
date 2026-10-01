@@ -503,6 +503,8 @@ After a PRD is reviewed and approved, a PRD plan derives work packages, componen
 
 Location: `docs/prds/<milestone>-<slug>.md` for the PRD and `docs/prds/<milestone>-<slug>.plan.md` for its PRD plan (e.g. `docs/prds/M1-walking-skeleton.md`). A split milestone uses one pair per PRD (`M6a-…`, `M6b-…`).
 
+Authoring rules, the split test, and the PRD template: [`docs/prds/README.md`](prds/README.md).
+
 ## Execution model
 
 ```text

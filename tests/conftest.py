@@ -29,8 +29,15 @@ def anyio_backend() -> str:
 
 
 def _test_database_url() -> str:
-    """`mana_leak_test`, same host/credentials as `Settings().database_url`."""
-    return str(make_url(get_settings().database_url).set(database="mana_leak_test"))
+    """`mana_leak_test`, same host/credentials as `Settings().database_url`.
+
+    `render_as_string(hide_password=False)` is required here: plain `str()`
+    on a SQLAlchemy `URL` masks the password as `***`, which made every
+    probe/connection in this fixture fail silently (DB-backed tests always
+    skipped instead of running) - a bug fixed by WP2 (`AGENTS.md` SS56).
+    """
+    url = make_url(get_settings().database_url).set(database="mana_leak_test")
+    return url.render_as_string(hide_password=False)
 
 
 def _sync_dsn(url: str) -> str:

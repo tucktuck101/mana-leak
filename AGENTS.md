@@ -1365,6 +1365,11 @@ Orchestration with workmux (`.workmux.yaml`):
 - Do not use the workmux lane-review gate or its seats. Reviews follow this section (§49a) only.
 - OpenRouter is reserved for the application's own model calls; never use it for development agents or reviewers.
 - Codex profiles and reviewers are used only when the user says so.
+- Concurrency: up to 8 lanes at once.
+- Worker profile: chosen per task in the PRD plan (each work package names its `omp-worker*` profile).
+- Before merge, the orchestrator runs mechanical checks only: lane handoff present, diff stays within the lane's owned files, the lane's acceptance command passes, `make test` and `make lint` pass. The §49a gate runs at phase boundaries (plan → implementation, milestone → Complete).
+- Tests may make live model calls through the app's configured model.
+- The orchestrator merges lanes serially in dependency order and resolves merge conflicts itself.
 
 ---
 

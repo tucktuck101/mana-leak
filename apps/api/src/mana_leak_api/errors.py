@@ -9,7 +9,16 @@ replaced to emit `ErrorResponse` with `validation_error`").
 
 Only the `ErrorCode` members M1's surfaces can raise are mapped
 (`mana_leak_core.contracts.errors.ErrorCode`); a later milestone extends
-this table alongside the enum it maps.
+this table alongside the enum it maps. An unmapped code falls back to `500`
+rather than raising `KeyError` here, because a `KeyError` inside the
+exception handler would bypass `ErrorResponse` entirely and return FastAPI's
+default plain-text 500 body.
+
+`model_limit_exceeded` has no row in contracts.md's HTTP error mapping table:
+the model-call cap can only be hit after `message_start`, so it reaches the
+client as an in-stream SSE `error` event, never as a status code. It is
+mapped to `500` only so the pre-stream path (an adapter calling `complete()`
+outside a turn stream) still produces a well-formed `ErrorResponse`.
 """
 
 from fastapi import FastAPI, Request, status
@@ -24,6 +33,7 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.conflict: status.HTTP_409_CONFLICT,
     ErrorCode.dependency_unavailable: status.HTTP_503_SERVICE_UNAVAILABLE,
     ErrorCode.timeout: status.HTTP_504_GATEWAY_TIMEOUT,
+    ErrorCode.model_limit_exceeded: status.HTTP_500_INTERNAL_SERVER_ERROR,
     ErrorCode.internal_error: status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 
@@ -44,7 +54,7 @@ def _error_response(
 
 async def _handle_mana_leak_error(request: Request, exc: ManaLeakError) -> JSONResponse:
     return _error_response(
-        _STATUS_BY_CODE[exc.code],
+        _STATUS_BY_CODE.get(exc.code, status.HTTP_500_INTERNAL_SERVER_ERROR),
         exc.code,
         exc.message,
         retryable=exc.retryable,

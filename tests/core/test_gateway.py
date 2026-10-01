@@ -3,44 +3,25 @@
 Covers the model gateway (`docs/prds/M1-walking-skeleton.plan.md` -> Shared
 contracts, Per-WP checklists -> WP3): the `complete()` signature, reasoning
 disabled by default, the per-turn call-budget contextvar, the gateway's own
-30 s timeout (independent of LiteLLM's `timeout=`), and outbound secret
-redaction. Every test except the one `live` streaming test patches LiteLLM
-with a fake.
-
-WP2's `mana_leak_core.audit` module does not exist in this worktree yet
-(plan Notes -> WP3 is cut alongside WP2). `gateway.py` imports
-`emit_audit_event` with `from .audit import emit_audit_event` -- the real,
-fixed signature -- so importing `mana_leak_core.gateway` needs
-`mana_leak_core.audit` to be importable. The block below installs a stub
-module in `sys.modules` only when the real one is absent; once WP2 merges,
-the real module imports normally and this is a no-op, so the orchestrator's
-re-run (plan Notes) exercises the real `emit_audit_event` without editing
-this file.
+30 s timeout (independent of LiteLLM's `timeout=`), the turn its audit rows
+are attributed to, and outbound secret redaction. Every test except the one
+`live` streaming test patches LiteLLM with a fake.
 """
 
 import asyncio
-import sys
-import types
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
-
-try:
-    import mana_leak_core.audit  # noqa: F401  (real module, once WP2 merges)
-except ModuleNotFoundError:
-    _stub = types.ModuleType("mana_leak_core.audit")
-    _stub.emit_audit_event = AsyncMock()
-    sys.modules["mana_leak_core.audit"] = _stub
-
 from mana_leak_core import gateway
 from mana_leak_core.contracts.enums import AuditEventType, Severity
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
 from mana_leak_core.db.models import AuditEvent
 from mana_leak_core.settings import Settings, get_settings
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -58,6 +39,7 @@ def _reset_turn_budget():
     point regardless of test order."""
     gateway._call_count.set(0)
     gateway._call_budget.set(None)
+    gateway._turn_ids.set(None)
     yield
 
 
@@ -73,7 +55,7 @@ async def gateway_audit_against_db(db, monkeypatch: pytest.MonkeyPatch):
     """Routes the *real* `emit_audit_event` (imported by `gateway.py`) through
     the `db` fixture's session against `mana_leak_test`, instead of mocking
     it away, so gateway tests can assert the actual `audit_event` row that
-    `_reserve_call`/`_emit_call_timeout` write (PRD AC-6, NFR-4)."""
+    `_reserve_call`/`_call_timeout` write (PRD AC-6, NFR-4)."""
 
     async def _single_session():
         yield db
@@ -253,12 +235,14 @@ async def test_call_budget_raises_model_limit_exceeded_at_cap(fake_litellm, audi
     with pytest.raises(ManaLeakError) as excinfo:
         await gateway.complete([{"role": "user", "content": "hi"}], model="m")
 
-    assert excinfo.value.code == "model_limit_exceeded"
+    assert excinfo.value.code is ErrorCode.model_limit_exceeded
     assert len(fake.calls) == 2  # the third call was never attempted
 
     audit_events.assert_called_once_with(
         AuditEventType.limit_reached,
         Severity.warning,
+        conversation_id=None,
+        turn_id=None,
         details={"limit": "model_calls_max", "value": 2},
     )
 
@@ -301,7 +285,7 @@ async def test_call_budget_defaults_to_settings_model_calls_max(fake_litellm, mo
     await gateway.complete([{"role": "user", "content": "hi"}], model="m")
     with pytest.raises(ManaLeakError) as excinfo:
         await gateway.complete([{"role": "user", "content": "hi"}], model="m")
-    assert excinfo.value.code == "model_limit_exceeded"
+    assert excinfo.value.code is ErrorCode.model_limit_exceeded
 
 
 async def test_start_turn_budget_resets_count_for_a_new_turn(fake_litellm) -> None:
@@ -316,6 +300,22 @@ async def test_start_turn_budget_resets_count_for_a_new_turn(fake_litellm) -> No
     await gateway.complete([{"role": "user", "content": "hi"}], model="m")  # does not raise
 
 
+async def test_audit_rows_name_the_turn_they_belong_to(fake_litellm, audit_events) -> None:
+    """`limit_reached` rows written by the gateway carry the turn's ids,
+    so they are attributable (`data-model.md` -> `audit_event`: a null
+    `conversation_id` means a CLI/MCP call with no conversation)."""
+    fake_litellm()
+    conversation_id, turn_id = uuid4(), uuid4()
+    gateway.start_turn_budget(max_calls=1, conversation_id=conversation_id, turn_id=turn_id)
+    await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    with pytest.raises(ManaLeakError):
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    assert audit_events.call_args.kwargs["conversation_id"] == conversation_id
+    assert audit_events.call_args.kwargs["turn_id"] == turn_id
+
+
 # --- Model-call timeout (AC-6, NFR-1) ----------------------------------------
 
 
@@ -328,11 +328,16 @@ async def test_non_streaming_call_past_timeout_raises_timeout_and_emits_limit_re
     with pytest.raises(ManaLeakError) as excinfo:
         await gateway.complete([{"role": "user", "content": "hi"}], model="m")
 
-    assert excinfo.value.code == ErrorCode.timeout
+    assert excinfo.value.code is ErrorCode.timeout
     assert excinfo.value.retryable is True
+    # `details` names the limit so the client can tell a model-call timeout
+    # from the turn deadline and from a disconnect (all `ErrorCode.timeout`).
+    assert excinfo.value.details == {"limit": "model_call_timeout_s", "value": 1}
     audit_events.assert_called_once_with(
         AuditEventType.limit_reached,
         Severity.warning,
+        conversation_id=None,
+        turn_id=None,
         details={"limit": "model_call_timeout_s", "value": 1},
     )
 
@@ -341,7 +346,7 @@ async def test_timeout_writes_limit_reached_audit_row(
     fake_litellm, gateway_audit_against_db, monkeypatch
 ) -> None:
     """Exercises the real `emit_audit_event` (not a mock) against
-    `mana_leak_test`: `_emit_call_timeout` must await the write, not
+    `mana_leak_test`: `_call_timeout` must await the write, not
     fire-and-forget a coroutine that never runs (PRD AC-6, NFR-4)."""
     monkeypatch.setattr(gateway, "get_settings", lambda: _settings(model_call_timeout_s=1))
     fake_litellm(hang_s=3)

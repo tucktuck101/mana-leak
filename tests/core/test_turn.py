@@ -114,6 +114,15 @@ def short_turn_deadline(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
+def _gateway_settings(**overrides: Any) -> Settings:
+    """Real `Settings` with `overrides` applied, for patching the *gateway*'s
+    `get_settings` (its own limits, not the orchestrator's)."""
+    base = get_settings()
+    return Settings(
+        **{**base.model_dump(), "openrouter_api_key": base.openrouter_api_key},
+    ).model_copy(update=overrides)
+
+
 async def _new_conversation(title: str | None = None) -> uuid.UUID:
     return (await conversations.create_conversation(title)).id
 
@@ -662,16 +671,34 @@ async def test_an_unexpected_failure_becomes_an_internal_error_event(turn_db, fa
     assert "litellm exploded" not in events[1].error.message
 
 
-async def test_an_unmapped_error_code_is_surfaced_as_internal_error(turn_db, fake_gateway) -> None:
-    # The gateway raises `model_limit_exceeded`, which is outside M1's
-    # `ErrorCode` subset (`contracts/errors.py`).
-    fake_gateway(raises=ManaLeakError("model_limit_exceeded", "budget of 8 calls exceeded"))
+async def test_the_model_call_cap_ends_the_turn_with_model_limit_exceeded(
+    turn_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real gateway, not a fake: with the absolute cap at 0 the turn's
+    only model call is refused before LiteLLM is contacted. The client sees
+    the code `contracts.md` -> Error taxonomy documents
+    (`model_limit_exceeded`, not a remapped `internal_error`), and the
+    gateway's own `limit_reached` row names the turn it belongs to."""
+    monkeypatch.setattr(gateway, "get_settings", lambda: _gateway_settings(model_calls_max=0))
     conversation_id = await _new_conversation()
 
     events = await _drain(orchestrator.process_turn(conversation_id, "hello"))
 
-    assert events[1].error.code is ErrorCode.internal_error
-    assert events[1].error.message == "budget of 8 calls exceeded"
+    assert [type(event) for event in events] == [MessageStart, ErrorEvent, MessageEnd]
+    assert events[1].error.code is ErrorCode.model_limit_exceeded
+    assert events[1].error.details == {"limit": "model_calls_max", "value": 0}
+
+    assistant = (await conversations.get_conversation(conversation_id)).messages[-1]
+    assert assistant.payload["error"]["code"] == "model_limit_exceeded"
+
+    rows = (
+        (await turn_db.execute(select(AuditEvent).where(AuditEvent.turn_id == events[0].turn_id)))
+        .scalars()
+        .all()
+    )
+    assert [row.event_type for row in rows] == [AuditEventType.limit_reached.value]
+    assert rows[0].conversation_id == conversation_id
+    assert rows[0].details == {"limit": "model_calls_max", "value": 0}
 
 
 # --- Live (AC-1 through the real gateway; CHAT_MODEL) --------------------------

@@ -1,11 +1,13 @@
-Current activity: M1 — milestone-gate fixes F1–F10 all merged (latest 84b90d4); fresh-volume boot + make e2e pass (F7). Browser smoke re-found an intermittent first-turn abort in a new chat; lane m1-fix-web3 (Opus) adding a Playwright regression test (10 runs) + root-cause fix.
+Current activity: M1 — Walking skeleton is Complete (2026-10-01). Next milestone: M2 — Observability (self-hosted Langfuse).
 
 Done:
-- M1 PRD Approved; plan Approved after Fable single-pass review (all 16 findings applied).
-- Wave 1 dispatched 2026-10-01: m1-contracts (WP1, omp-worker-lite), m1-web (WP6, omp-worker), m1-compose (WP7, omp-worker-lite). Lane prompts in .workmux/prompts/ (git-excluded).
+- M1 PRD + plan Complete; ROADMAP M1 = Complete. Verification log in docs/prds/M1-walking-skeleton.plan.md.
+- make test (122 Python + 19 web), make lint, make e2e (incl. Playwright browser test, 11/11) pass on master.
 
-In flight: lane m1-fix-web3. Compose stack up on a fresh volume.
+In flight: nothing. Compose stack (postgres/api/web) is running.
 
-Waiting on user: rotate the OpenRouter key (a failing test printed it into the session transcript; fixed in f93e4b6) and update .env.
+Waiting on user: (1) OpenRouter key rotation (optional, user's call); (2) go-ahead to start M2 PRD.
 
-Next action: when m1-fix-web3 settles, verify the browser test failed before and passes 10/10 after, merge, rebuild web, make e2e (now includes browser test), then mark M1 Complete (ROADMAP + PRD + plan).
+Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
+
+Next action: derive docs/prds/M2-observability.md from ROADMAP M2 per docs/prds/README.md; user reviews it.

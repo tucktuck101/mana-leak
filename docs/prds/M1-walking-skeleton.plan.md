@@ -4,7 +4,7 @@ PRD: [`M1-walking-skeleton.md`](M1-walking-skeleton.md) (Approved). This plan sa
 
 ## Status
 
-Approved (user, 2026-10-01). Wave 1 dispatched.
+Complete (2026-10-01).
 
 Review log: Fable single pass 2026-10-01 — 8 MAJOR / 6 MINOR / 2 NIT; all applied.
 
@@ -169,7 +169,7 @@ M1 is `Complete` only when the PRD's completion condition holds:
 | WP3 | Merged | 3f90ca7 | Merged before WP2 after a transient pre-merge failure; re-tested on master with the real audit.py (54 passed); follow-up 081a952: gateway now awaits emit_audit_event (limit_reached rows were never written) |
 | WP4 | Merged | b4b81e0 | append_message gained keyword-only message_id; ModelContext shape defined (contracts updated); end_session without message and non-other forced_route are validation_error in M1 |
 | WP5 | Merged | 69a1cd3 | Follow-up 5881f59: tests against real process_turn, real concurrent-POST 409 test, live SSE+history test |
-| WP6 | Merged | 4fc8b92 | Follow-ups 491f1c7 (render final.text, flush SSE tail, refresh title) and 5004672 (Send/Stop shared one slot so a Send click aborted the turn; dropped sends now explained) |
+| WP6 | Merged | 4fc8b92 | Follow-ups 491f1c7 (render final.text, flush SSE tail, refresh title) and 5004672 (Send/Stop shared one slot so a Send click aborted the turn; dropped sends now explained); b647abb (pre-hydration clicks no longer navigate; Playwright test) |
 | WP7 | Merged | b0a259b | Lane filled local-dev DB passwords in the shared .env (gitignored) |
 | WP8 | Merged | 7b64935 | make e2e passes on master (after freeing host disk; Postgres had failed with ENOSPC). Browser AC-12 walkthrough found web defects D1 (streamed tail dropped) and D2 (title not refreshed): fix lane m1-fix-web |
 
@@ -177,4 +177,6 @@ M1 is `Complete` only when the PRD's completion condition holds:
 
 - 2026-10-01: `make test` (115 passed), `make lint`, `make e2e` (health → proxied chat stream → postgres + api restart → history → mid-stream abort persisted with `payload.error`) all pass on master.
 - 2026-10-01: AC-12 performed by the orchestrator in headless Chromium against the Compose stack: new chat, four turns streamed in full, title set after the first turn, no persisted message carries `payload.error`, reload shows all 10 messages, conversation continues. Two web defects found only by this walkthrough (not by unit or e2e tests) were fixed first.
-- Pending: `AGENTS.md` §49a milestone → Complete review gate.
+- §49a milestone gate (Fable, single pass): 2 MAJOR, 6 MINOR, 2 NIT — all fixed (gateway/SSE single producer task, per-chunk timeout, model_limit_exceeded, audit attribution, explicit api env, SecretStr DATABASE_URL, LOG_LEVEL, SessionControl, web tests in make test, deviations recorded). F7: fresh-volume boot (`docker compose down -v`) passes `make e2e`.
+- Browser smoke after the gate found an intermittent first-turn abort: controls clicked before hydration submitted the form natively and navigated away. Fixed in b647abb (controls inert until hydration) with a Playwright regression test (10 new-chat runs + pre-hydration click), now part of `make e2e`.
+- Final: `make test` (122 Python + 19 web), `make lint`, `make e2e` incl. browser test (11/11) all pass on master. M1 Complete.

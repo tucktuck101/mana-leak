@@ -41,7 +41,7 @@ This is a solo build with no fixed per-milestone time budget. The checkpoint rul
 
 | Milestone | Outcome | Depends on | Status |
 |---|---|---|---|
-| M1 — Walking skeleton | A persisted, resumable, streamed chat product in the browser, with a plain model answer | Design docs, repository scaffold | Not Started |
+| M1 — Walking skeleton | A persisted, resumable, streamed chat product in the browser, with a plain model answer | Design docs, repository scaffold | Complete |
 | M2 — Observability | Every chat turn traced in self-hosted Langfuse, degrading safely when it is down | M1 | Not Started |
 | M3 — Cards | Deterministic search and inspection of current card data, reachable in chat | M1 | Not Started |
 | M4 — Combos | Discover and explain known Commander Spellbook combos in chat | M3 | Not Started |

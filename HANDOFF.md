@@ -1,11 +1,11 @@
-Current activity: M1 — Walking skeleton. PRD Approved (user). PRD plan drafted: docs/prds/M1-walking-skeleton.plan.md.
+Current activity: M1 — Walking skeleton, implementation. Orchestrating via workmux (AGENTS.md §49a orchestration rules). Plan: docs/prds/M1-walking-skeleton.plan.md (Approved).
 
 Done:
-- PRD authoring standard + template (docs/prds/README.md, TEMPLATE.md).
-- M1 PRD: 9 FR, 4 NFR, 12 AC. User decided: M1 runs deterministic validation only (model screening in M8); summarisation deferred to M8.
-- LLM spike passed (results in ROADMAP → Decisions & deviations).
+- M1 PRD Approved; plan Approved after Fable single-pass review (all 16 findings applied).
+- Wave 1 dispatched 2026-10-01: m1-contracts (WP1, omp-worker-lite), m1-web (WP6, omp-worker), m1-compose (WP7, omp-worker-lite). Lane prompts in .workmux/prompts/ (git-excluded).
 
-In flight: nothing.
-Waiting on user: review of docs/prds/M1-walking-skeleton.plan.md. Do NOT dispatch any workmux lane until the user approves it.
+In flight: wave 1 lanes (worktrees in ../mana-leak__worktrees/). Check `workmux status --json m1-contracts m1-web m1-compose`.
 
-Next action: after plan approval, run the §49a gate if the user wants one (plan → implementation), then dispatch wave 1 (WP1, WP6, WP7) per the plan.
+Waiting on user: nothing.
+
+Next action: when wave 1 settles (done/waiting), read each lane's .workmux/HANDOFF.md, run mechanical pre-merge checks (owned paths only, acceptance command, make test, make lint), merge serially WP1 → WP7 → WP6 into master (orchestrator resolves conflicts), update plan Progress table, then dispatch wave 2 (WP2 m1-db, WP3 m1-gateway) with `docker compose up -d postgres` running.

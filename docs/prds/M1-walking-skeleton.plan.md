@@ -171,4 +171,4 @@ M1 is `Complete` only when the PRD's completion condition holds:
 | WP5 | Merged | 69a1cd3 | Re-test against real process_turn + real concurrent-POST test in lane m1-api-real |
 | WP6 | Merged | 4fc8b92 | |
 | WP7 | Merged | b0a259b | Lane filled local-dev DB passwords in the shared .env (gitignored) |
-| WP8 | In progress | | Lane m1-e2e; gateway audit await fix in lane m1-fix-audit |
+| WP8 | Merged | 7b64935 | make e2e passes on master (after freeing host disk; Postgres had failed with ENOSPC). Browser AC-12 walkthrough found web defects D1 (streamed tail dropped) and D2 (title not refreshed): fix lane m1-fix-web |

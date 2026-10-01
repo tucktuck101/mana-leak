@@ -1,11 +1,11 @@
-Current activity: Design-docs review gate (AGENTS.md §49a), round 3 review.
+Current activity: M1 — Walking skeleton (roadmap milestone 1). Not started.
 
-Done this activity:
-- Round 1 + 2 reviews and repairs committed (67f41e1, bc79756). Reports/decisions in ~/.omp-tmp/ (mana-leak-review-r1/r2.md, r1/r2-decisions.md).
-- Roadmap reorganised to walking skeleton first (M1–M11); Langfuse at M2.
+Done:
+- Design review gate closed after round 3 (user decision). Remaining MINOR findings are listed as "Open PRD inputs" in docs/ROADMAP.md → Decisions & deviations. Reports/decisions in ~/.omp-tmp/ (mana-leak-review-r1..r3.md, r1..r3-decisions.md).
+- Roadmap: M1–M10 core + stretch S1 (CLI + MCP).
 
-In flight: Fable round 3 review (AdversarialDocReview3) → ~/.omp-tmp/mana-leak-review-r3.md.
+In flight: nothing.
 
 Waiting on user: nothing.
 
-Next action: triage round 3; ask user on product/architecture items; fan out one repair agent per file; commit; round 4 if BLOCKER/MAJOR remain (max 5). Fable bucket was 8% at round 3 start; if <5% for round 4, ask user (recommend codex as substitute reviewer).
+Next action: M1 spikes — (1) chat model via LiteLLM/OpenRouter: streaming + structured output + tool calling (pick CHAT_MODEL/ROUTER_MODEL; record in .env.example and Decisions & deviations); (2) Next.js route-handler SSE passthrough with compress:false. Then write docs/prds/M1-walking-skeleton.md + .plan.md, run a lightweight review gate on the PRD, build.

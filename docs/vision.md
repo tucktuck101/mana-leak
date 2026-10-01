@@ -43,7 +43,7 @@ combo
   ↓
 "how does this work?"
   ↓
-"why is this legal?"
+"is this legal?"
   ↓
 current card + rules evidence
   ↓
@@ -52,9 +52,9 @@ cited ruling
 
 When a question depends on game state the player has not given, the assistant **asks a small number of targeted clarification questions**, remembers the answers, and then finishes the ruling. If it still cannot support a ruling after a bounded number of rounds, it says so and explains what is missing.
 
-Rules questions get a natural-language explanation with citations, able to walk through complex board states step by step, not just a bare verdict. If the player asks for a rule's exact wording, the assistant quotes it verbatim instead of paraphrasing. If the player asks whether something is legal or works, the assistant returns a structured, cited ruling. While a ruling conversation is open, the player can always continue it, start a new question, or step away from it; each interface offers this in whatever way fits how it is normally used there, without the player needing to know it is a distinct mode.
+Rules questions get a natural-language explanation with citations, able to walk through complex board states step by step, not just a bare verdict. If the player asks for a rule's exact wording, the assistant quotes it verbatim instead of paraphrasing. If the player asks whether something is legal or works, the assistant returns a structured, cited ruling. The chat behaves like a familiar assistant conversation: while a ruling clarification is pending, an unrelated follow-up (a card lookup, a different question) is simply answered like any other message, and the player can come back and answer the clarification whenever they are ready to finish the ruling.
 
-Conversations persist, so a player can return and continue. The same capabilities are available from the web chat, a CLI, and an MCP interface, because all of them sit on the same underlying product.
+Conversations persist, so a player can return and continue. The web chat is the core interface that all capabilities are built against; a CLI and an MCP server are planned stretch interfaces over that same underlying product, not required for the core experience.
 
 ## Value proposition
 
@@ -94,7 +94,7 @@ If a ruling depends on game-state information that is missing, the assistant ask
 
 ### One shared core
 
-The web app, CLI, MCP interface, and model-facing tools are thin adapters over the same domain capabilities. There is one card search, one combo search, one rules retrieval, and one judge.
+The web app is the core interface that every capability is built against. The CLI, the MCP interface, and model-facing tools are thin adapters over the same domain capabilities; the CLI and MCP interface are planned stretch additions (see Stretch goals), not required for the core product. There is one card search, one combo search, one rules retrieval, and one judge.
 
 ### Narrow beats broad
 
@@ -139,14 +139,14 @@ The application runs locally. A clean checkout with the required configuration s
 1. A player starts a conversation and searches for or identifies some cards.
 2. They ask whether those cards form any known Commander combos, and the assistant finds one in the combo data.
 3. They ask how the combo works and get its steps, prerequisites, and result.
-4. They ask why the interaction is legal under the current rules.
+4. They ask whether the interaction is legal under the current rules.
 5. The assistant retrieves the current card text and the relevant Comprehensive Rules.
 6. It returns a structured ruling with a readable explanation and citations.
 7. The player asks a deliberately ambiguous follow-up.
 8. The assistant identifies the missing game state and asks targeted questions.
 9. Once the player answers, the assistant completes the ruling, or it explains why it still cannot support one.
 
-The same journey can be inspected through tracing, and the same core capabilities can be reached from the CLI and MCP interface.
+The same journey can be inspected through tracing. Reaching the same core capabilities from a CLI and an MCP interface is a stretch goal, pursued only after the core demo is stable.
 
 ## Must-be-true statements
 
@@ -187,7 +187,8 @@ These exclusions protect the scope deliberately. They are not missing features.
 
 Stretch goals are outside the product's core definition and are not required for success. They are considered only after the core demo is stable:
 
-- speech-to-text (the preferred first stretch goal);
+- CLI and MCP interfaces exposing the same core capabilities as the web chat;
+- speech-to-text (the preferred first stretch goal after CLI/MCP);
 - browser microphone input;
 - text-to-speech;
 - richer card-search functionality;

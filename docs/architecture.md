@@ -9,7 +9,7 @@ This document describes how Mana Leak is shaped: its parts, their responsibiliti
 - Local-only. The complete system runs on one machine via Docker Compose. There is no public deployment.
 - Single user, no authentication. The stack binds to `127.0.0.1`.
 - Python 3.12 managed as a `uv` workspace: `packages/core` (shared core) and `apps/api` (adapters). Next.js in `apps/web`.
-- **Assumption:** the CLI and MCP server live in the `apps/api` package as separate entrypoints alongside FastAPI. This keeps one adapter package without adding a new top-level directory.
+- **Assumption:** the operational CLI (ingestion, evals) and the Stretch S1 Agent interfaces (user/agent CLI and MCP server) live in the `apps/api` package as separate entrypoints alongside FastAPI. This keeps one adapter package without adding a new top-level directory.
 
 ## System context
 
@@ -33,7 +33,7 @@ flowchart LR
         qa[mtg-qa-145K-corpus<br/>Hugging Face]
     end
 
-    user -->|web chat, CLI, MCP client| ml
+    user -->|web chat; CLI, MCP client (Stretch S1)| ml
     ml -->|model calls| or
     ml -->|combo queries| csb
     ml -->|traces| lf
@@ -56,7 +56,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     user([Player])
-    mcpc([MCP client])
+    mcpc([MCP client<br/>Stretch S1])
 
     subgraph compose [Docker Compose - localhost]
         web[web<br/>Next.js / React<br/>UI only]
@@ -76,13 +76,19 @@ flowchart TB
         end
     end
 
-    cli[CLI<br/>host process]
-    mcp[MCP server<br/>FastMCP, stdio]
+    opcli[Operational CLI<br/>ingestion, evals<br/>host process]
+
+    subgraph s1 [Stretch S1 - Agent interfaces]
+        cli[User/agent CLI<br/>host process]
+        mcp[MCP server<br/>FastMCP, stdio]
+    end
+
     core[[shared core<br/>packages/core<br/>linked into api, CLI, MCP]]
 
     user --> web --> api
-    user --> cli
-    mcpc --> mcp
+    opcli --> core
+    user -.-> cli
+    mcpc -.-> mcp
     api --> core
     cli --> core
     mcp --> core
@@ -99,8 +105,9 @@ flowchart TB
 | **web** | Render chat, stream assistant output, list and resume conversations, display structured judge answers (rulings, rules explanations, rule text) and citations. The browser talks only to Next.js; a Next.js route handler proxies `/api/*` to `API_BASE_URL` server-side, with SSE streaming passthrough. | Call models, databases, or external sources; contain domain logic; expose the API directly to the browser. |
 | **api** | HTTP adapter: streamed chat endpoint, REST endpoints for conversations, cards, combos, rules, and health. Translates HTTP to core calls and core results/events to HTTP/SSE. | Implement search, retrieval, routing, or judging. |
 | **shared core** | All domain and application logic (below). A library, not a separate service. | Know about HTTP, SSE, CLI parsing, or MCP framing. |
-| **CLI** | Thin command-line adapter over the core, used for demos, ingestion, and evals. Runs on the host via `uv` or via `docker compose exec api`; the api image includes `evals/fixtures` and Compose mounts `./data`, so ingestion and evals work in both. | Duplicate core logic. |
-| **MCP server** | Thin FastMCP adapter exposing core capabilities as MCP tools. | Duplicate core logic or widen tool permissions. |
+| **Operational CLI** | Thin command-line adapter over the core, shipped with the core milestones that need it: `ingest cards` (M3), `ingest combo-fixtures` (M4), `ingest rules` (M5), `eval smoke`/`eval run` (M10). Runs on the host via `uv` or via `docker compose exec api`; the api image includes `evals/fixtures` and Compose mounts `./data`, so ingestion and evals work in both. | Duplicate core logic; add user-facing commands outside Stretch S1. |
+| **CLI (Stretch S1)** | Optional user/agent command-line adapter (`cards`, `combos`, `rules`, `judge`, `chat` with slash commands) over the same core, built only after the core demo is stable. Same host/container story as the operational CLI. | Duplicate core logic. |
+| **MCP server (Stretch S1)** | Optional thin FastMCP adapter exposing the core's six read tools plus `judge`, built only after the core demo is stable. | Duplicate core logic or widen tool permissions. |
 | **postgres** | One PostgreSQL 16 server with pgvector. `mana_leak` holds application state, cards, rules chunks, and embeddings. `langfuse` is owned by Langfuse. | Mix Langfuse and application tables. |
 | **Langfuse stack** | Self-hosted tracing UI and ingestion. Its components follow the current official Langfuse Docker Compose for the pinned version. | Become an application dependency for answering. |
 
@@ -132,7 +139,7 @@ flowchart LR
     llm[Model gateway<br/>LiteLLM] --- router & runner & judge & guard
 ```
 
-**Turn orchestrator.** `process_turn` is the single entrypoint for a conversational turn, used by every adapter — including CLI `judge` and MCP `judge`, which call it with the route forced to `judge`. Each turn is sequenced: (1) if a Judge session is active for the conversation, session controls and the continuation decision resolve the turn regardless of any forced route; (2) otherwise, an adapter-forced route (as CLI/MCP `judge` sets) is used; (3) otherwise, the router classifies it. For a forced-`judge` caller, a `leave_session` continuation resolves to a new judge question rather than an unrouted turn, so CLI and MCP `judge` get the same screening, persistence, and continuation semantics as web. After routing it runs the tool loop or judge, then persistence and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
+**Turn orchestrator.** `process_turn` is the single entrypoint for a conversational turn, used by every adapter — including the Stretch S1 CLI `judge` and MCP `judge`, which call it with the route forced to `judge`. Each turn is sequenced: (1) if a Judge session is active for the conversation, session controls and the continuation decision resolve the turn regardless of any forced route; (2) otherwise, an adapter-forced route (as CLI/MCP `judge` sets) is used; (3) otherwise, the router classifies it. For a forced-`judge` caller, an `unrelated` continuation resolves to a new judge question rather than an unrouted turn, so CLI and MCP `judge` get the same screening, persistence, and continuation semantics as web. After routing it runs the tool loop or judge, then persistence and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
 
 **Model gateway.** A small wrapper over LiteLLM/OpenRouter used by every model call. It applies the model timeout, the structured-output retry, and the transient-failure retries, and attaches tracing metadata. Model identifiers come from configuration.
 
@@ -144,7 +151,7 @@ flowchart LR
 
 **Rules retrieval.** Runtime search over indexed rule chunks: pgvector semantic search, PostgreSQL full-text search, and direct lookup by rule number. It returns at most 8 chunks, each with a stable rule number and provenance for citation.
 
-**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer; it runs only in step 3 of the turn orchestrator's sequence (see Turn orchestrator), after the active-session check and any forced route. With a Judge session active, session controls take over instead of the router, following the conventions of the calling interface: an explicit "End session"/"New chat" action in the web UI, `/cancel` or `/new <question>` in the CLI, or an `action` argument on MCP's `judge` tool. These are explicit actions, never text matching — plain text such as "cancel" is never treated as intent to leave (it may be a card name). Without an explicit control, one bounded model call returns a `ContinuationDecision` (`answer`, `new_question`, or `leave_session`); when it cannot tell (for example, a bare word that is both a card name and an intent), the assistant asks the user to clarify rather than guessing. `answer` adds the message to known facts and re-judges; `new_question` leaves the old session and starts a new judge flow; `leave_session` leaves the session and routes the turn normally.
+**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer; it runs only in step 3 of the turn orchestrator's sequence (see Turn orchestrator), after the active-session check and any forced route. With a Judge session active, session controls take over instead of the router, following the conventions of the calling interface: an explicit "End session"/"New chat" action in the web UI, `/cancel` or `/new <question>` in the CLI, or an `action` argument on MCP's `judge` tool (CLI and MCP are Stretch S1). These are explicit actions, never text matching — plain text such as "cancel" is never treated as intent to leave (it may be a card name). Without an explicit control, one bounded model call returns a `ContinuationDecision` (`answer`, `new_question`, or `unrelated`); when it cannot tell (for example, a bare word that is both a card name and an intent), the assistant asks the user to clarify rather than guessing. `answer` adds the message to known facts and re-judges; `new_question` abandons the old session and starts a new judge flow; `unrelated` routes the turn normally — like any other chat message — without touching the session, which stays `active` so a later message answering the outstanding clarification still continues it.
 
 **Tool runner.** The bounded tool-calling loop. It exposes only the route's allowlisted tools to the model, validates every tool call's arguments against its schema, executes the matching core service, shapes and truncates results, and returns failures to the model as structured tool errors instead of raising. It stops after 5 tool steps.
 
@@ -159,13 +166,13 @@ flowchart LR
 
 **Sufficiency decision (Jev role).** The "is this enough to rule?" step is the bounded decision where Jev is used. Its output is a small typed result: sufficient, or insufficient with a list of missing facts. Code owns the consequence. If Jev is unavailable, a local model call with the same output schema substitutes. Jev is never the source of the rules conclusion.
 
-**Judge-session state.** A persisted record per active clarification workflow: the original question, known game-state facts, missing facts, clarification count, status, and the final answer (ruling, rules explanation, or rule text). Code owns all transitions. At most 3 clarification rounds; after that the session closes with `insufficient_information` and an explanation of what is missing.
+**Judge-session state.** A persisted record per active clarification workflow: the original question, known game-state facts, missing facts, clarification count, status, and the final answer (ruling or rules explanation). Code owns all transitions. The session ends when: the answer completes (`completed`), the round cap is reached (`exhausted`, closing with `insufficient_information` and an explanation of what is missing), a `new_question` replaces it (`abandoned`), or the user uses the explicit "End session" control / `/cancel` (`abandoned`). An unrelated message is answered normally and leaves the session `active`. At most `JUDGE_MAX_CLARIFICATIONS` clarification rounds (default 3).
 
 **Conversation service.** Persists conversations and messages, supports resume after reload, and builds the bounded model context. The conversation ID is the Langfuse session ID and is attached to Judge sessions, rulings, and audit events.
 
 **Safeguards.** Input screening (length cap, malformed input, a bounded classifier returning `clear`, `suspicious`, or `uncertain`), separation of instructions from data in prompts, tool allowlists, ensuring secrets never enter prompts, logs, or error messages, and hard execution limits. Code decides the consequence of a screening result: continue, continue with heightened restriction, or refuse safely.
 
-**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down. The application database stores no prompts; Langfuse stores generation input/output (full prompts and completions) in its own local stores, separate from `mana_leak` — or, under the Cloud emergency fallback (see Local deployment), in Langfuse Cloud's stores instead. Secrets never enter prompts, so there is nothing for Langfuse to redact. The API's health response reports Langfuse status from the SDK's last cached state, never a synchronous per-request probe, so Langfuse downtime cannot flap API liveness.
+**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down. The application database stores no prompts; Langfuse stores generation input/output (full prompts and completions) in its own local, self-hosted stores, separate from `mana_leak`. Secrets never enter prompts, so there is nothing for Langfuse to redact. The API's health response reports Langfuse status from the SDK's last cached state, never a synchronous per-request probe, so Langfuse downtime cannot flap API liveness.
 
 ## Request flows
 
@@ -236,13 +243,16 @@ A rule-number lookup ("what does rule 702.19 say?") skips sufficiency and genera
 ```mermaid
 stateDiagram-v2
     [*] --> Evaluating: judge question
-    Evaluating --> Ruled: sufficient
+    Evaluating --> Ruled: sufficient, draft has no assumptions
+    Evaluating --> Ruled: sufficient, draft has assumptions, rounds exhausted (force-ask reports the draft)
     Evaluating --> AwaitingClarification: insufficient (persist session, ask)
+    Evaluating --> AwaitingClarification: sufficient, draft has assumptions, rounds remain (force-ask asks instead)
     AwaitingClarification --> Evaluating: continuation=answer (update facts, round += 1)
-    AwaitingClarification --> Abandoned: continuation=leave_session (explicit control or model classification)
+    AwaitingClarification --> AwaitingClarification: continuation=unrelated (answered normally, session stays active)
     AwaitingClarification --> Abandoned: continuation=new_question (old session abandoned, new judge flow starts)
-    Evaluating --> Exhausted: insufficient and round = 3
-    Ruled --> [*]: close session
+    AwaitingClarification --> Abandoned: explicit End session control (web button or /cancel)
+    Evaluating --> Exhausted: insufficient and round = JUDGE_MAX_CLARIFICATIONS
+    Ruled --> [*]: close session (completed)
     Exhausted --> [*]: insufficient_information
     Abandoned --> [*]
 ```
@@ -399,8 +409,8 @@ Docker Compose on `localhost` is the only deployment target. `docker compose up 
 - **postgres**: PostgreSQL 16 + pgvector, named volume, health check. An init script creates the `mana_leak` and `langfuse` databases with separate users and enables `vector` only in `mana_leak`.
 - **api**: FastAPI, depends on a healthy `postgres`, and reaches it through the Compose network.
 - **web**: Next.js standalone build; calls the API.
-- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. Added in M2, not before; the current `docker-compose.yml` marks the slot until then. If self-hosting the Langfuse stack does not work, fall back to a Langfuse Cloud project using the same SDK (emergency fallback only, never the default plan); under the Cloud fallback, generation input/output is stored by Langfuse Cloud instead of the local stack, so user text, card text, and rules excerpts leave the machine.
-- **CLI and MCP** run from the same Python environment as the API, on the host via `uv` or inside the api container (which includes `evals/fixtures` and mounts `./data`).
+- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. Added in M2, not before. Langfuse's own `LANGFUSE_INIT_*` environment variables (org, project, public and secret key) provision the project headlessly on first startup, so the app's `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` match without any UI steps. M2's exit criterion: a chat turn appears as a trace under its conversation's session in the local self-hosted Langfuse UI; the app keeps answering when Langfuse is down (see Failure and degradation) — there is no Cloud fallback.
+- **Operational CLI**: ingestion and eval commands run from the same Python environment as the API, on the host via `uv` or inside the api container (which includes `evals/fixtures` and mounts `./data`). The Stretch S1 user/agent CLI and MCP server, if built, use the same environment.
 - Data import and rules ingestion are explicit commands run before the demo. Imported data persists in the named Postgres volume. Bulk downloads stay in the git-ignored `data/` directory.
 
 ## Data boundaries
@@ -424,8 +434,9 @@ Fields, keys, and indexes are defined in `data-model.md`.
 - **Internal Python interfaces:** typed core service functions; the canonical contract that every adapter calls.
 - **LLM tool schemas:** generated from the same Pydantic argument models as the core interfaces.
 - **FastAPI:** REST for conversations and direct domain queries; a streaming chat endpoint over SSE using Mana Leak's own `TurnEvent` format. No CORS: only the Next.js route handler proxy calls it directly. The AI SDK is optional and not adopted; a chat library would adapt to this format in the web layer.
-- **CLI:** commands for search, combos, rules, judge, chat, ingestion, and evals.
-- **MCP:** FastMCP tools mirroring the core tool set.
+- **Operational CLI:** ingestion (`ingest cards`, `ingest combo-fixtures`, `ingest rules`) and eval (`eval smoke`, `eval run`) commands, shipped with the core milestones that need them.
+- **CLI (Stretch S1):** commands for search, combos, rules, judge, and chat (with slash commands), a thin adapter over `process_turn`/core services.
+- **MCP (Stretch S1):** FastMCP tools mirroring the core's six read tools plus `judge`.
 
 Exact signatures, schemas, endpoints, stream events, commands, and error shapes are defined in `contracts.md`.
 
@@ -444,15 +455,15 @@ Evaluation is a first-class part of the system but is separate from runtime auth
 | Adversarial/safeguard | 15 |
 | Stateful Judge mode | 10 |
 
-The 3 `judge_mode` smoke cases are one completed answer (ruling or rules explanation), one exhausted (clarification rounds used up), and one where the user leaves the session mid-clarification (`continuation=leave_session`).
+The 3 `judge_mode` smoke cases are one completed answer (ruling or rules explanation), one exhausted (clarification rounds used up), and one where the user ends the session mid-clarification via the explicit session control (`abandoned`).
 
-The harness records model, prompt, and configuration versions with every run, so results are comparable. Gate thresholds and blockers are defined in `contracts.md` → "Evaluation contracts" → "Gates"; run cadence is defined in the M10 PRD.
+The harness records model, prompt, and configuration versions with every run, so results are comparable. Gate thresholds and blockers are defined in `contracts.md` → "Evaluation contracts" → "Gates"; run cadence is defined in the M9 PRD.
 
 ## Architectural decisions
 
 **Shared Python core**
 - *Decision:* All domain logic lives in `packages/core`; API, CLI, MCP, and tool schemas are adapters.
-- *Rationale:* One implementation to test and evaluate; four required interfaces in 24 hours.
+- *Rationale:* One implementation to test and evaluate; the web UI and the operational CLI — the required interfaces — share it, and the Stretch S1 CLI/MCP adapters add zero new logic when built.
 - *Consequence:* Adapters stay thin; any logic found in an adapter is a defect.
 
 **PostgreSQL + pgvector**
@@ -506,5 +517,5 @@ If something can be a function in the shared core, it is a function in the share
 ## Open issues
 
 - Exact Langfuse versions and supporting-service configuration are fixed when the Langfuse Compose task is done.
-- Embedding and chat model identifiers are configuration; defaults are chosen in `contracts.md`.
+- Embedding and chat model identifiers are configuration; defaults are chosen during M1 and recorded in `.env.example` and ROADMAP's Decisions & deviations.
 - The Jev integration mechanism (external service or library) is confirmed during the judge milestone; the local substitute keeps the architecture unchanged either way.

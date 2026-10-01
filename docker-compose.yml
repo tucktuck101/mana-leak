@@ -28,12 +28,10 @@ services:
       DATABASE_URL: postgresql+psycopg://mana_leak:${MANA_LEAK_DB_PASSWORD}@postgres:5432/mana_leak
       # Overrides the host-default LANGFUSE_HOST (unset in .env, so it falls
       # back to the Settings class's http://localhost:3001) with the
-      # self-hosted langfuse-web container's URL for when the self-hosted
-      # Langfuse stack is added in M10 (langfuse-web is not yet part of this
-      # Compose file); tracing stays disabled until then because
-      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY are unset. Set LANGFUSE_HOST
-      # in .env (e.g. to a Langfuse Cloud URL) to override this default
-      # without editing this file.
+      # self-hosted langfuse-web container's URL for the M2 Langfuse stack
+      # (langfuse-web is part of this Compose file; see the stack block
+      # below). Set LANGFUSE_HOST in .env (e.g. to a Langfuse Cloud URL) to
+      # override this default without editing this file.
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
     volumes:
       # Downloaded bulk card data (ingest_cards) and other runtime files;
@@ -60,11 +58,11 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
 
-  # Langfuse stack is added in M10: self-hosted Langfuse (langfuse-web,
-  # langfuse-worker, clickhouse, redis/valkey, minio) following the current
-  # official Langfuse docker-compose for the pinned version. Langfuse must use
-  # the dedicated `langfuse` database/user created by
-  # scripts/postgres-init/01-databases.sh, never the `mana_leak` database.
+  # Langfuse stack (M2): self-hosted Langfuse (langfuse-web, langfuse-worker,
+  # clickhouse, redis/valkey, minio) following the current official Langfuse
+  # docker-compose for the pinned version. Langfuse must use the dedicated
+  # `langfuse` database/user created by scripts/postgres-init/01-databases.sh,
+  # never the `mana_leak` database.
 
 volumes:
   postgres-data:

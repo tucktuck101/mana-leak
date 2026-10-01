@@ -110,7 +110,7 @@ One row per Commander Spellbook variant (the record users see as a combo). Cache
 | `results` | jsonb | no | Array of strings (the "produces" features, e.g. `"Infinite copies of Kiki-Jiki"`) |
 | `legal_commander` | boolean | yes | Spellbook legality flag when present |
 | `card_names` | text[] | no | Canonical names of pieces, denormalised for display |
-| `templates` | jsonb | yes | Spellbook `requires[]` template placeholders (non-card requirements such as "any creature with haste"); kept as Spellbook's own objects, not reduced to card names; null when the variant has no templates |
+| `templates` | jsonb | yes | Spellbook `requires[]` template placeholders (non-card requirements such as "any creature with haste"); stored as a `jsonb` array of template-name strings (`list[str]`, matching `Combo.templates` in `contracts.md`), not reduced to card names; null when the variant has no templates |
 | provenance | | | `source='commander_spellbook'`, `source_url` = combo page URL, `source_version` = Spellbook bulk `version` string (falling back to `retrieved_at`'s date) for live fetches, `fixture-<date>` for fixture loads, `retrieved_at` |
 
 Not stored: Spellbook popularity/deck counts, prices, and variant-of/alias graphs.
@@ -233,10 +233,10 @@ The structured judge output: legality rulings and rules explanations share this 
 | `summary` | text | no | One- or two-sentence outcome |
 | `explanation` | text | no | Displayed explanation |
 | `assumptions` | jsonb | no | Array of strings |
-| `missing_information` | jsonb | no | Array of strings; non-empty only when `status='insufficient_information'`, always empty otherwise — including every `kind='explanation'` row, since `status` is null there |
+| `missing_information` | jsonb | no | Array of strings; non-empty when `status='insufficient_information'` (`kind='ruling'`, from M6) or when a `kind='explanation'` row can't fully answer the question from available evidence (`kind='explanation'` has no `status`, so this is how pre-M6 insufficiency is expressed — DOC-203); empty otherwise |
 | `card_oracle_ids` | uuid[] | no | Cards involved |
 | `rule_numbers` | text[] | no | Cited rule/subrule numbers, e.g. `{702.19c,613.1}` |
-| `citations` | jsonb | no | Array of evidence references (below) |
+| `citations` | jsonb | no | Array of evidence references (below); empty only for a `kind='explanation'` row with non-empty `missing_information` — insufficient evidence to cite anything (DOC-203) |
 | `rules_version` | text | yes | Rules version the cited rule chunks came from |
 | `card_source_version` | text | yes | Card import version used |
 | `model` | text | no | Model identifier that generated the ruling |
@@ -386,7 +386,7 @@ Commander legality is not indexed: it is a low-cardinality filter applied togeth
 | `rule_chunk.kind` ∈ {`rule`, `glossary`} | `CHECK` |
 | `audit_event.severity` ∈ {`info`, `warning`, `error`} | `CHECK` |
 | Provenance present on external data | `NOT NULL` on `source`, `source_version`, `retrieved_at` |
-| `missing_information` empty unless `status='insufficient_information'` | Application validation (Pydantic) |
+| `missing_information` empty unless `status='insufficient_information'` (`kind='ruling'`) or the row is a `kind='explanation'` with insufficient evidence (DOC-203) | Application validation (Pydantic) |
 | Citations reference evidence retrieved in the producing turn | Application validation before insert |
 | `terminal status ⇔ closed_at set` | Application code |
 
@@ -396,7 +396,7 @@ Commander legality is not indexed: it is a low-cardinality filter applied togeth
 |---|---|---|
 | Colours, colour identity, keywords, face names, combo card names, subrule numbers, ruling rule numbers/card IDs | `text[]` / `uuid[]` | Simple containment queries, GIN-indexable |
 | Card faces | `jsonb` | Variable per layout; displayed, not queried |
-| Combo prerequisites/steps/results/templates | `jsonb` | Ordered display lists and opaque placeholder objects; never filtered |
+| Combo prerequisites/steps/results/templates | `jsonb` | Ordered display lists of strings; never filtered |
 | Judge known/missing facts | `jsonb` | Small evolving lists owned by code |
 | Ruling assumptions, missing information, citations | `jsonb` | Structured, displayed, validated in code |
 | Message payload | `jsonb` | Varies by result type |
@@ -429,7 +429,7 @@ Rulings keep `rules_version`, `card_source_version`, rule numbers, and short quo
 ## Not persisted
 
 - API keys, secrets, or credentials (environment only).
-- Full raw model prompts: the app DB stores no prompts; Langfuse stores generation input/output in its own local stores; secrets never enter prompts.
+- Full raw model prompts: the app DB stores no prompts; self-hosted Langfuse stores generation input/output in its own local ClickHouse/MinIO stores (no Cloud fallback); secrets never enter prompts.
 - Streaming token deltas.
 - Complete raw external HTTP responses (only the mapped fields above).
 - Filesystem or shell data.
@@ -446,7 +446,7 @@ Rulings keep `rules_version`, `card_source_version`, rule numbers, and short quo
 
 **Decision:** Alembic from the start, using autogenerate from the SQLModel metadata, with a single initial migration created in M1 and one further migration per milestone that introduces or changes tables.
 
-**Sequencing:** M1's initial migration creates only `conversation` and `message` — the walking-skeleton scope (Docker Compose, FastAPI SSE, persisted/resumable chat; no cards, combos, rules, or judge yet). Every other table in this document is added by its own later migration when the milestone that needs it is reached: `card` in M3 (Cards); `combo`/`combo_card` in M4 (Combos); `rule_chunk` and `ruling` in M5 (Rules explanations) — at that point `ruling.kind` is always `'explanation'` and `status`/`judge_session_id` are unused (null), matching the pre-M7 rule that insufficiency has no session row; `judge_session` plus the `ruling.judge_session_id` FK column in M7 (Stateful Judge), once a table exists for it to reference; and `eval_case`/`eval_run` in M10 (Evaluation). M6 (Structured rulings) starts writing `kind='ruling'` rows with real `status` values using columns that already exist from M5 — no schema change. This keeps each migration scoped to the milestone that needs it, instead of front-loading the full schema in M1.
+**Sequencing:** M1's initial migration creates `conversation`, `message`, and `audit_event` — the walking-skeleton scope (Docker Compose, FastAPI SSE, persisted/resumable chat, audit events emitted from the first turn; no cards, combos, rules, or judge yet). Every other table in this document is added by its own later migration when the milestone that needs it is reached: `card` in M3 (Cards); `combo`/`combo_card` in M4 (Combos); `rule_chunk`, `ruling`, `eval_case`, and `eval_run` in M5 (Rules explanations), where the evidence ledger, citation validation, and the eval harness all start — at that point `ruling.kind` is always `'explanation'` and `status`/`judge_session_id` are unused (null); an explanation the model can't fully answer still persists as a `kind='explanation'` row with empty `citations` and non-empty `missing_information`, rather than going unwritten, since the `Ruling` kind and its `status` field don't exist until M6 (DOC-203); `judge_session` plus the `ruling.judge_session_id` FK column in M7 (Stateful Judge), once a table exists for it to reference. M6 (Structured rulings) starts writing `kind='ruling'` rows with real `status` values (including `insufficient_information`) using columns that already exist from M5 — no schema change. This keeps each migration scoped to the milestone that needs it, instead of front-loading the full schema in M1.
 
 **Rationale:** Conversation and eval data accumulate during the build, and `create_all` cannot alter existing tables. Generated columns (`search_tsv`), the partial unique index, `CHECK`s, and `pg_trgm` need explicit DDL, and Alembic handles that in one place. Autogenerate keeps the cost to a command.
 

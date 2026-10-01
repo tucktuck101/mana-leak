@@ -164,11 +164,11 @@ M1 is `Complete` only when the PRD's completion condition holds:
 
 | WP | Status | Merged commit | Notes |
 |---|---|---|---|
-| WP1 | Not started | | |
+| WP1 | Merged | b2ff27d | Follow-up f93e4b6: Settings secrets as SecretStr, hermetic Settings tests (a failing test had printed the real API key) |
 | WP2 | Not started | | |
 | WP3 | Not started | | |
 | WP4 | Not started | | |
 | WP5 | Not started | | |
-| WP6 | Not started | | |
-| WP7 | Not started | | |
+| WP6 | Merged | 4fc8b92 | |
+| WP7 | Merged | b0a259b | Lane filled local-dev DB passwords in the shared .env (gitignored) |
 | WP8 | Not started | | |

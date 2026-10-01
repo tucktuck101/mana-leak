@@ -1,13 +1,9 @@
-Current activity: M2 — PRD Approved (cef035f+). PRD plan drafted: docs/prds/M2-observability.plan.md (Draft).
+Current activity: M2 — Observability, implementation. PRD + plan Approved (docs/prds/M2-observability{,.plan}.md). Wave 1 dispatched 2026-10-01: m2-test-db (WP1, lite), m2-compose (WP2, omp-worker), m2-tracing-core (WP3, opus). Prompts in .workmux/prompts/m2-wp*.md.
 
-Done:
-- M1 PRD + plan Complete; ROADMAP M1 = Complete. Verification log in docs/prds/M1-walking-skeleton.plan.md.
-- make test (122 Python + 19 web), make lint, make e2e (incl. Playwright browser test, 11/11) pass on master.
+Done: M1 Complete. M2 PRD + plan Fable-reviewed (single pass each), all findings applied; secrets fail closed (user decision); per-worktree test schemas (user decision).
 
-In flight: nothing.
+In flight: wave 1 lanes. Compose postgres/api/web running.
 
-Waiting on user: approval of docs/prds/M2-observability.plan.md after Fable review fixes (F8 fail-closed). Do NOT dispatch until approved.
+Waiting on user: nothing.
 
-Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
-
-Next action: on approval, preflight (docker system prune if disk < 20 GB free), dispatch wave 1 (WP1 m2-test-db, WP2 m2-compose, WP3 m2-tracing-core).
+Next action: when wave 1 settles: fan-in (handoff, owned paths only, acceptance, make test, make lint), merge serially WP1 → WP2 → WP3, then wave 2 in merge order WP4 → WP6 → WP5 (re-test WP5 after WP6), then WP7 e2e, browser + Langfuse UI check, §49a milestone gate, doc-sync step, mark M2 Complete.

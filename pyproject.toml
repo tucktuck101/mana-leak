@@ -1,0 +1,30 @@
+[project]
+name = "mana-leak"
+version = "0.1.0"
+description = "Mana Leak workspace root"
+requires-python = ">=3.12,<3.13"
+dependencies = ["mana-leak-core", "mana-leak-api"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/core", "apps/api"]
+
+[tool.uv.sources]
+mana-leak-core = { workspace = true }
+mana-leak-api = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["apps/web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

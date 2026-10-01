@@ -1,0 +1,52 @@
+name: mana-leak
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      MANA_LEAK_DB_PASSWORD: ${MANA_LEAK_DB_PASSWORD:?set MANA_LEAK_DB_PASSWORD in .env}
+      LANGFUSE_DB_PASSWORD: ${LANGFUSE_DB_PASSWORD:?set LANGFUSE_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mana_leak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://mana_leak:${MANA_LEAK_DB_PASSWORD}@postgres:5432/mana_leak
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  web:
+    build:
+      context: apps/web
+    environment:
+      API_BASE_URL: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # NEXT INFRASTRUCTURE TASK: self-hosted Langfuse stack.
+  # Add langfuse-web, langfuse-worker, clickhouse, redis/valkey and minio
+  # following the current official Langfuse docker-compose for the pinned version.
+  # Langfuse must use the dedicated `langfuse` database/user created by
+  # scripts/postgres-init/01-databases.sh, never the `mana_leak` database.
+
+volumes:
+  postgres-data:

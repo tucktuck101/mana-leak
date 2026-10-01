@@ -1,0 +1,43 @@
+# Secrets
+.env
+.env.*
+__omp_shell(".env.example")
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Eval outputs (fixtures in evals/fixtures/ stay tracked)
+evals/results/*
+__omp_shell("evals/results/.gitkeep")
+
+# Locally downloaded bulk datasets and runtime files
+data/*
+__omp_shell("data/.gitkeep")
+*.db
+*.sqlite
+*.sqlite3
+*.log

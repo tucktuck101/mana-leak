@@ -18,28 +18,28 @@ re-run (plan Notes) exercises the real `emit_audit_event` without editing
 this file.
 """
 
-from __future__ import annotations
-
 import asyncio
 import sys
 import types
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
 try:
     import mana_leak_core.audit  # noqa: F401  (real module, once WP2 merges)
 except ModuleNotFoundError:
     _stub = types.ModuleType("mana_leak_core.audit")
-    _stub.emit_audit_event = lambda *args, **kwargs: None
+    _stub.emit_audit_event = AsyncMock()
     sys.modules["mana_leak_core.audit"] = _stub
 
 from mana_leak_core import gateway
 from mana_leak_core.contracts.enums import AuditEventType, Severity
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
+from mana_leak_core.db.models import AuditEvent
 from mana_leak_core.settings import Settings, get_settings
 
 pytestmark = pytest.mark.anyio
@@ -62,10 +62,24 @@ def _reset_turn_budget():
 
 
 @pytest.fixture
-def audit_events(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    mock = Mock()
+def audit_events(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    mock = AsyncMock()
     monkeypatch.setattr(gateway, "emit_audit_event", mock)
     return mock
+
+
+@pytest.fixture
+async def gateway_audit_against_db(db, monkeypatch: pytest.MonkeyPatch):
+    """Routes the *real* `emit_audit_event` (imported by `gateway.py`) through
+    the `db` fixture's session against `mana_leak_test`, instead of mocking
+    it away, so gateway tests can assert the actual `audit_event` row that
+    `_reserve_call`/`_emit_call_timeout` write (PRD AC-6, NFR-4)."""
+
+    async def _single_session():
+        yield db
+
+    monkeypatch.setattr("mana_leak_core.audit.get_session", _single_session)
+    return db
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -249,6 +263,37 @@ async def test_call_budget_raises_model_limit_exceeded_at_cap(fake_litellm, audi
     )
 
 
+async def test_call_budget_exceeded_writes_limit_reached_audit_row(
+    fake_litellm, gateway_audit_against_db
+) -> None:
+    """Exercises the real `emit_audit_event` (not a mock) against
+    `mana_leak_test`: `_reserve_call` must await the write, not fire-and-forget
+    a coroutine that never runs (PRD AC-6, NFR-4)."""
+    fake_litellm()
+    gateway.start_turn_budget(max_calls=2)
+    await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+    await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    with pytest.raises(ManaLeakError):
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    db = gateway_audit_against_db
+    rows = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == AuditEventType.limit_reached.value
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].severity == Severity.warning.value
+    assert rows[0].details == {"limit": "model_calls_max", "value": 2}
+
+
 async def test_call_budget_defaults_to_settings_model_calls_max(fake_litellm, monkeypatch) -> None:
     monkeypatch.setattr(gateway, "get_settings", lambda: _settings(model_calls_max=1))
     fake_litellm()
@@ -290,6 +335,37 @@ async def test_non_streaming_call_past_timeout_raises_timeout_and_emits_limit_re
         Severity.warning,
         details={"limit": "model_call_timeout_s", "value": 1},
     )
+
+
+async def test_timeout_writes_limit_reached_audit_row(
+    fake_litellm, gateway_audit_against_db, monkeypatch
+) -> None:
+    """Exercises the real `emit_audit_event` (not a mock) against
+    `mana_leak_test`: `_emit_call_timeout` must await the write, not
+    fire-and-forget a coroutine that never runs (PRD AC-6, NFR-4)."""
+    monkeypatch.setattr(gateway, "get_settings", lambda: _settings(model_call_timeout_s=1))
+    fake_litellm(hang_s=3)
+
+    with pytest.raises(ManaLeakError) as excinfo:
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    assert excinfo.value.code == ErrorCode.timeout
+
+    db = gateway_audit_against_db
+    rows = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == AuditEventType.limit_reached.value
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].severity == Severity.warning.value
+    assert rows[0].details == {"limit": "model_call_timeout_s", "value": 1}
 
 
 async def test_streaming_call_past_timeout_raises_timeout(

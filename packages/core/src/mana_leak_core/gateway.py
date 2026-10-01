@@ -149,7 +149,7 @@ def _check_no_secrets(messages: Sequence[dict[str, str]], settings: Settings) ->
             )
 
 
-def _reserve_call(settings: Settings) -> None:
+async def _reserve_call(settings: Settings) -> None:
     """Cap-check + increment (contracts.md -> Operational limits: "What
     counts toward model calls per turn"). Raises before the call that would
     exceed the absolute cap, instead of attempting it."""
@@ -159,7 +159,7 @@ def _reserve_call(settings: Settings) -> None:
     used = _call_count.get()
     if used >= budget:
         logger.warning("model-call budget exceeded: %s calls, cap %s", used, budget)
-        emit_audit_event(
+        await emit_audit_event(
             AuditEventType.limit_reached,
             Severity.warning,
             details={"limit": "model_calls_max", "value": budget},
@@ -172,8 +172,8 @@ def _reserve_call(settings: Settings) -> None:
     _call_count.set(used + 1)
 
 
-def _emit_call_timeout(settings: Settings) -> None:
-    emit_audit_event(
+async def _emit_call_timeout(settings: Settings) -> None:
+    await emit_audit_event(
         AuditEventType.limit_reached,
         Severity.warning,
         details={"limit": "model_call_timeout_s", "value": settings.model_call_timeout_s},
@@ -221,7 +221,7 @@ async def complete(
     call."""
     settings = get_settings()
     _check_no_secrets(messages, settings)
-    _reserve_call(settings)
+    await _reserve_call(settings)
     kwargs = _build_kwargs(
         messages,
         model=model,
@@ -241,7 +241,7 @@ async def _complete_once(kwargs: dict[str, Any], settings: Settings) -> ModelRes
         async with asyncio.timeout(settings.model_call_timeout_s):
             response = await litellm.acompletion(**kwargs)
     except TimeoutError:
-        _emit_call_timeout(settings)
+        await _emit_call_timeout(settings)
         raise ManaLeakError(ErrorCode.timeout, "model call timed out", retryable=True) from None
     choice = response.choices[0]
     return ModelResponse(
@@ -262,5 +262,5 @@ async def _stream(kwargs: dict[str, Any], settings: Settings) -> AsyncIterator[M
                 if delta or finish_reason:
                     yield ModelChunk(delta=delta, finish_reason=finish_reason)
     except TimeoutError:
-        _emit_call_timeout(settings)
+        await _emit_call_timeout(settings)
         raise ManaLeakError(ErrorCode.timeout, "model call timed out", retryable=True) from None

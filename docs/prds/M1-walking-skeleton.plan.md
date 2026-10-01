@@ -165,8 +165,8 @@ M1 is `Complete` only when the PRD's completion condition holds:
 | WP | Status | Merged commit | Notes |
 |---|---|---|---|
 | WP1 | Merged | b2ff27d | Follow-up f93e4b6: Settings secrets as SecretStr, hermetic Settings tests (a failing test had printed the real API key) |
-| WP2 | Not started | | |
-| WP3 | Not started | | |
+| WP2 | Merged | 0b75338 | Also fixed tests/conftest.py password masking (DB tests had silently skipped) |
+| WP3 | Merged | 3f90ca7 | Merged before WP2 after a transient pre-merge failure; re-tested on master with the real audit.py (54 passed) |
 | WP4 | Not started | | |
 | WP5 | Not started | | |
 | WP6 | Merged | 4fc8b92 | |

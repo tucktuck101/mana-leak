@@ -1,16 +1,17 @@
 """Model gateway (`docs/contracts.md` -> External adapters -> Model gateway,
 Langfuse, Operational limits; `docs/prds/M1-walking-skeleton.plan.md` ->
-Shared contracts, Per-WP checklists -> WP3).
+Shared contracts, Per-WP checklists -> WP3; `docs/prds/M2-observability.plan.md`
+-> Per-WP checklists -> WP4).
 
 Only module that imports LiteLLM. `complete()`'s signature matches
-contracts.md verbatim; M1 callers (`process_turn`'s `other` route) always
-pass `tools=None`, `response_model=None`, `trace=None` -- tool calling and
-structured output arrive with the milestones that use them, and
-`TraceContext`/Langfuse tracing is out of M1 scope (WP3 never builds
-`TraceContext`; the `trace` parameter exists now only so this signature
-does not change later).
+contracts.md verbatim; callers (`process_turn`'s `other` route) still pass
+`tools=None` and `response_model=None` -- tool calling and structured
+output arrive with the milestones that use them -- but `trace` is real
+from M2 on: it is a `tracing.TraceContext | None` (same keyword, same
+position, same `None` default as M1's placeholder) and drives the
+generation observation described below.
 
-Three things the gateway enforces on every call, independent of LiteLLM:
+Four things the gateway enforces on every call, independent of LiteLLM:
 
 - **Per-turn model-call budget.** `process_turn` (WP4) calls
   `start_turn_budget(conversation_id=..., turn_id=...)` once at turn start,
@@ -46,12 +47,28 @@ Three things the gateway enforces on every call, independent of LiteLLM:
   `limit_reached` itself (PRD AC-6; the turn orchestrator
   separately emits `limit_reached` for the 120 s overall turn deadline --
   exactly one emitter per limit).
-- **Secret redaction.** Before any outbound message is sent, the gateway
-  asserts that no configured `SecretStr` value in `Settings` (just
-  `openrouter_api_key` in M1) appears in any message's `content` --
+- **Secret redaction.** Before any outbound message is sent -- and before
+  anything about it is traced -- the gateway asserts that no configured
+  `SecretStr` value in `Settings` (`openrouter_api_key`,
+  `langfuse_secret_key`, ...) appears in any message's `content`,
   iterating `Settings`' fields generically rather than naming them, so
-  later `SecretStr` additions (`LANGFUSE_SECRET_KEY`, `JEV_API_KEY`, ...)
-  are covered without another edit here.
+  later `SecretStr` additions are covered without another edit here. The
+  check is public as `check_no_secrets()` (M2 WP4): `orchestrator.py`
+  calls the same function on the user message before it opens the turn
+  trace, so the fail-closed guarantee covers the turn-level observation
+  too (M2 PRD NFR-2), with no scrubbing anywhere in `tracing.py`.
+- **Generation observations (M2).** When the caller passes a
+  `TraceContext`, every `complete()` call is recorded as a child
+  generation of the turn's trace (`tracing.record_generation`, M2 FR-4).
+  Nesting is ambient -- OTel's currently-active span -- so no span handle
+  crosses the orchestrator/gateway boundary; it holds because the SSE
+  adapter drives the whole turn from one task (see the budget bullet).
+  The span is opened inside `_stream()`'s own generator body, not in
+  `complete()`, which returns the generator unstarted. Streamed token
+  usage is requested explicitly (`stream_options={"include_usage": True}`,
+  without which LiteLLM never populates `.usage` on a streamed chunk) and
+  reported on the generation together with the provider's cost when it
+  supplies one, else an explicit null (M2 FR-5).
 
 Reasoning is disabled by default on every call
 (`extra_body={"reasoning": {"enabled": False}}`, not opt-in per call) --
@@ -86,12 +103,14 @@ from .audit import emit_audit_event
 from .contracts.enums import AuditEventType, Severity
 from .contracts.errors import ErrorCode, ManaLeakError
 from .settings import Settings, get_settings
+from .tracing import Observation, TraceContext, record_generation
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "ModelChunk",
     "ModelResponse",
+    "check_no_secrets",
     "complete",
     "current_call_count",
     "start_turn_budget",
@@ -160,7 +179,13 @@ async def _audit_limit_reached(limit: str, value: int) -> None:
     )
 
 
-def _check_no_secrets(messages: Sequence[dict[str, str]], settings: Settings) -> None:
+def check_no_secrets(messages: Sequence[dict[str, str]], settings: Settings) -> None:
+    """Fail closed if any configured secret value appears in `messages`
+    (module docstring -> Secret redaction). `complete()` calls this before
+    the model call and before any generation observation; `_run_turn`
+    calls it on the user message before opening the turn trace, so no
+    secret-bearing content reaches Langfuse at all (M2 PRD NFR-2, AC-8).
+    Raises `ManaLeakError(internal_error)` without echoing the secret."""
     secrets = [
         value.get_secret_value()
         for _name, value in settings
@@ -227,11 +252,39 @@ def _build_kwargs(
         "api_key": settings.openrouter_api_key.get_secret_value(),
         "extra_body": {"reasoning": {"enabled": False}},
     }
+    if stream:
+        # Without this, LiteLLM never populates `.usage` on a streamed
+        # chunk and FR-5's token counts would be unavailable (verified).
+        kwargs["stream_options"] = {"include_usage": True}
     if tools is not None:
         kwargs["tools"] = tools
     if response_model is not None:
         kwargs["response_format"] = response_model
     return kwargs
+
+
+def _record_result(observation: Observation, output: str, usage: Any) -> None:
+    """Close out a generation with the provider's own numbers (FR-5).
+
+    `litellm`'s `Usage` *deletes* `cost` when the provider reported none
+    (verified: attribute access then raises `AttributeError`), so every
+    field is read with `getattr`; a missing cost is reported as an
+    explicit null rather than a fabricated number.
+    """
+    cost = getattr(usage, "cost", None) if usage is not None else None
+    observation.update(
+        output=output,
+        usage_details=(
+            {
+                "input": getattr(usage, "prompt_tokens", 0),
+                "output": getattr(usage, "completion_tokens", 0),
+                "total": getattr(usage, "total_tokens", 0),
+            }
+            if usage is not None
+            else None
+        ),
+        cost_details={"total": cost} if cost is not None else None,
+    )
 
 
 async def complete(
@@ -242,14 +295,15 @@ async def complete(
     response_model: type[BaseModel] | None = None,
     stream: bool = False,
     max_tokens: int = 1500,
-    trace: object | None = None,  # TraceContext; unused in M1, see module docstring
+    trace: TraceContext | None = None,
 ) -> ModelResponse | AsyncIterator[ModelChunk]:
-    """`docs/contracts.md` -> External adapters -> Model gateway. M1 callers
-    pass `tools=None`, `response_model=None`, `trace=None`; see the module
-    docstring for the budget/timeout/redaction behaviour enforced on every
-    call."""
+    """`docs/contracts.md` -> External adapters -> Model gateway. Callers
+    pass `tools=None`, `response_model=None`; `trace` is the turn's
+    `TraceContext` when the call belongs to a turn (M2 FR-4) and `None`
+    otherwise. See the module docstring for the budget/timeout/redaction
+    behaviour enforced on every call."""
     settings = get_settings()
-    _check_no_secrets(messages, settings)
+    check_no_secrets(messages, settings)
     await _reserve_call(settings)
     kwargs = _build_kwargs(
         messages,
@@ -261,47 +315,74 @@ async def complete(
         settings=settings,
     )
     if stream:
-        return _stream(kwargs, settings)
-    return await _complete_once(kwargs, settings)
+        return _stream(kwargs, settings, trace)
+    return await _complete_once(kwargs, settings, trace)
 
 
-async def _complete_once(kwargs: dict[str, Any], settings: Settings) -> ModelResponse:
-    try:
-        async with asyncio.timeout(settings.model_call_timeout_s):
-            response = await litellm.acompletion(**kwargs)
-    except TimeoutError:
-        raise await _call_timeout(settings) from None
-    choice = response.choices[0]
-    return ModelResponse(
-        text=choice.message.content or "",
-        finish_reason=choice.finish_reason,
-        model=kwargs["model"],
-    )
+async def _complete_once(
+    kwargs: dict[str, Any], settings: Settings, trace: TraceContext | None
+) -> ModelResponse:
+    with record_generation(trace, model=kwargs["model"], input=kwargs["messages"]) as generation:
+        try:
+            async with asyncio.timeout(settings.model_call_timeout_s):
+                response = await litellm.acompletion(**kwargs)
+        except TimeoutError:
+            raise await _call_timeout(settings) from None
+        choice = response.choices[0]
+        text = choice.message.content or ""
+        _record_result(generation, text, getattr(response, "usage", None))
+        return ModelResponse(
+            text=text,
+            finish_reason=choice.finish_reason,
+            model=kwargs["model"],
+        )
 
 
-async def _stream(kwargs: dict[str, Any], settings: Settings) -> AsyncIterator[ModelChunk]:
+async def _stream(
+    kwargs: dict[str, Any], settings: Settings, trace: TraceContext | None
+) -> AsyncIterator[ModelChunk]:
     """Bounds the whole call -- connection plus every chunk -- with one
     loop-time deadline, opening a timeout scope around each single `await`
     and never across the `yield` (see the module docstring: a scope held
     across a `yield` is armed in whichever task resumes the generator, not
-    in the task that is stalled waiting for the next chunk)."""
-    deadline = asyncio.get_running_loop().time() + settings.model_call_timeout_s
-    try:
-        async with asyncio.timeout_at(deadline):
-            response = await litellm.acompletion(**kwargs)
-    except TimeoutError:
-        raise await _call_timeout(settings) from None
-    parts = response.__aiter__()
-    while True:
+    in the task that is stalled waiting for the next chunk).
+
+    The generation observation is opened here, in the generator's own
+    body, rather than in `complete()`: `complete()` returns this generator
+    unstarted, so a span opened there would be closed before the first
+    chunk ever arrived.
+    """
+    with record_generation(trace, model=kwargs["model"], input=kwargs["messages"]) as generation:
+        deadline = asyncio.get_running_loop().time() + settings.model_call_timeout_s
         try:
             async with asyncio.timeout_at(deadline):
-                part = await anext(parts)
-        except StopAsyncIteration:
-            return
+                response = await litellm.acompletion(**kwargs)
         except TimeoutError:
             raise await _call_timeout(settings) from None
-        choice = part.choices[0]
-        delta = choice.delta.content or ""
-        finish_reason = choice.finish_reason
-        if delta or finish_reason:
-            yield ModelChunk(delta=delta, finish_reason=finish_reason)
+        parts = response.__aiter__()
+        text: list[str] = []
+        usage: Any = None
+        while True:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    part = await anext(parts)
+            except StopAsyncIteration:
+                _record_result(generation, "".join(text), usage)
+                return
+            except TimeoutError:
+                raise await _call_timeout(settings) from None
+            chunk_usage = getattr(part, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            if not part.choices:
+                # `stream_options={"include_usage": True}` makes LiteLLM
+                # emit a terminal usage-only chunk with `choices == []`
+                # (verified); indexing it would raise `IndexError`.
+                continue
+            choice = part.choices[0]
+            delta = choice.delta.content or ""
+            finish_reason = choice.finish_reason
+            if delta:
+                text.append(delta)
+            if delta or finish_reason:
+                yield ModelChunk(delta=delta, finish_reason=finish_reason)

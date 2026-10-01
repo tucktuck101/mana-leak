@@ -917,6 +917,7 @@ Loaded by one `pydantic-settings` `Settings` class in the core (env vars, then `
 | `EMBEDDING_DIMENSIONS` | yes | — | Vector size for `rule_chunk.embedding`; ingestion verifies it against the first embedding returned and aborts on mismatch |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | no | — | Tracing; if either is empty, tracing is disabled |
 | `LANGFUSE_HOST` | no | `http://localhost:3001` | Langfuse URL for host/CLI runs; Compose's `api` service defaults it to the `langfuse-web` container's URL but still reads it from the environment (self-hosted only — there is no Langfuse Cloud fallback) |
+| `LANGFUSE_INIT_USER_NAME`, `NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, `CLICKHOUSE_PASSWORD`, `REDIS_AUTH`, `MINIO_ROOT_PASSWORD` | Compose only | — | Langfuse-stack bootstrap and headless provisioning secrets (M2); read by `langfuse-web`/`langfuse-worker`/ClickHouse/Redis/MinIO, never by `api` |
 | `SPELLBOOK_BASE_URL` | no | `https://backend.commanderspellbook.com` | Spellbook API |
 | `COMBO_SOURCE` | no | `live` | `live` (live, then cache, then fixtures) or `fixtures` (offline demo) |
 | `RULES_SOURCE_URL` | no | — | Comprehensive Rules TXT URL; required for `ingest rules` without `--url` |

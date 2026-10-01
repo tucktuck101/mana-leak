@@ -222,8 +222,32 @@ def test_health_response_langfuse_is_disabled_not_a_boolean() -> None:
 
 # --- Settings ------------------------------------------------------------------
 
+# Every env var `Settings` reads. Real shells/CI may export `OPENROUTER_API_KEY`
+# (and friends) from the repo's `.env` before `make test` runs the live-test
+# gate (plan.md -> Execution model); without clearing these first, a value the
+# process already has beats the test's own `tmp_path` env file and a mismatch
+# would print the real secret in pytest's assertion diff.
+_SETTINGS_ENV_VARS = (
+    "DATABASE_URL",
+    "OPENROUTER_API_KEY",
+    "CHAT_MODEL",
+    "LOG_LEVEL",
+    "MODEL_CALL_TIMEOUT_S",
+    "TURN_TIMEOUT_S",
+    "MODEL_CALLS_MAX",
+    "MAX_TOKENS",
+    "MAX_USER_MESSAGE_CHARS",
+    "CONTEXT_TURNS",
+)
 
-def test_settings_loads_required_fields_and_limit_defaults(tmp_path) -> None:
+
+def _clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _SETTINGS_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_loads_required_fields_and_limit_defaults(tmp_path, monkeypatch) -> None:
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "DATABASE_URL=postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak\n"
@@ -232,7 +256,7 @@ def test_settings_loads_required_fields_and_limit_defaults(tmp_path) -> None:
     )
     settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
     assert settings.database_url.endswith("/mana_leak")
-    assert settings.openrouter_api_key == "test-key"
+    assert settings.openrouter_api_key.get_secret_value() == "test-key"
     assert settings.chat_model == "openrouter/test/model"
     assert settings.log_level == "INFO"
     assert settings.model_call_timeout_s == 30
@@ -243,7 +267,8 @@ def test_settings_loads_required_fields_and_limit_defaults(tmp_path) -> None:
     assert settings.context_turns == 10
 
 
-def test_settings_ignores_unrelated_env_keys(tmp_path) -> None:
+def test_settings_ignores_unrelated_env_keys(tmp_path, monkeypatch) -> None:
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "DATABASE_URL=postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak\n"
@@ -253,13 +278,26 @@ def test_settings_ignores_unrelated_env_keys(tmp_path) -> None:
         "LANGFUSE_PUBLIC_KEY=pk-test\n"
     )
     settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
-    assert settings.openrouter_api_key == "test-key"
+    assert settings.openrouter_api_key.get_secret_value() == "test-key"
     assert not hasattr(settings, "langfuse_public_key")
 
 
+def test_settings_never_leaks_secret_in_repr_or_str(tmp_path, monkeypatch) -> None:
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DATABASE_URL=postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak\n"
+        "OPENROUTER_API_KEY=sk-or-super-secret-value\n"
+        "CHAT_MODEL=openrouter/test/model\n"
+    )
+    settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
+    assert "sk-or-super-secret-value" not in repr(settings)
+    assert "sk-or-super-secret-value" not in str(settings.openrouter_api_key)
+    assert str(settings.openrouter_api_key) == "**********"
+
+
 def test_settings_requires_core_fields(tmp_path, monkeypatch) -> None:
-    for key in ("DATABASE_URL", "OPENROUTER_API_KEY", "CHAT_MODEL"):
-        monkeypatch.delenv(key, raising=False)
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text("LOG_LEVEL=DEBUG\n")
     with pytest.raises(ValidationError):
@@ -268,6 +306,7 @@ def test_settings_requires_core_fields(tmp_path, monkeypatch) -> None:
 
 def test_get_settings_is_cached(monkeypatch) -> None:
     get_settings.cache_clear()
+    _clear_settings_env(monkeypatch)
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("CHAT_MODEL", "openrouter/test/model")

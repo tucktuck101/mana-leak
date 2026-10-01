@@ -9,6 +9,7 @@ surface using it, since nothing in M1 reads them yet.
 
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +18,7 @@ class Settings(BaseSettings):
 
     # Required (contracts.md -> Configuration).
     database_url: str
-    openrouter_api_key: str
+    openrouter_api_key: SecretStr
     chat_model: str
 
     log_level: str = "INFO"

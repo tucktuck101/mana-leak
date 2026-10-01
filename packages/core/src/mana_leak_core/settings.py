@@ -23,6 +23,18 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Langfuse (contracts.md -> Configuration). Optional: with either key
+    # empty, `tracing.py` builds no client and every tracing call is a
+    # no-op (M2 FR-3). `langfuse_host` is self-hosted only -- there is no
+    # Langfuse Cloud fallback, and the SDK is always configured from this
+    # value so its own `https://cloud.langfuse.com` default is never
+    # reached. The Langfuse *stack's* own bootstrap variables
+    # (`LANGFUSE_INIT_*`, `NEXTAUTH_SECRET`, `CLICKHOUSE_PASSWORD`, ...)
+    # are read by those containers, never by this application.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str = "http://localhost:3001"
+
     # Operational limits (contracts.md -> Operational limits), reachable in
     # M1: the model-call timeout and turn deadline the gateway/orchestrator
     # enforce themselves (NFR-1), the per-turn model-call cap the gateway

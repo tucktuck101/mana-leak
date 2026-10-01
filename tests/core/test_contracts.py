@@ -239,6 +239,12 @@ _SETTINGS_ENV_VARS = (
     "MAX_TOKENS",
     "MAX_USER_MESSAGE_CHARS",
     "CONTEXT_TURNS",
+    # M2 added these three as real `Settings` fields; the shell environment
+    # that runs `make test` may export them (Compose/orchestrator do), and a
+    # real env var beats the test's own `tmp_path` env file.
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_HOST",
 )
 
 
@@ -266,6 +272,11 @@ def test_settings_loads_required_fields_and_limit_defaults(tmp_path, monkeypatch
     assert settings.max_tokens == 1500
     assert settings.max_user_message_chars == 8000
     assert settings.context_turns == 10
+    # M2: tracing is off unless both keys are configured, and the endpoint
+    # is the local self-hosted stack, never the SDK's Cloud default.
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_host == "http://localhost:3001"
 
 
 def test_settings_ignores_unrelated_env_keys(tmp_path, monkeypatch) -> None:
@@ -275,12 +286,21 @@ def test_settings_ignores_unrelated_env_keys(tmp_path, monkeypatch) -> None:
         "DATABASE_URL=postgresql+psycopg://mana_leak:pw@localhost:5432/mana_leak\n"
         "OPENROUTER_API_KEY=test-key\n"
         "CHAT_MODEL=openrouter/test/model\n"
-        # Unrelated to M1's Settings fields; extra='ignore' must not choke on it.
-        "LANGFUSE_PUBLIC_KEY=pk-test\n"
+        # Not a `Settings` field at this milestone (contracts.md ->
+        # Configuration assigns it to the combo source, M6); extra='ignore'
+        # must not choke on it.
+        "SPELLBOOK_BASE_URL=https://example.invalid\n"
+        # M2's own variables, by contrast, are now read (PRD M2 FR-3).
+        "LANGFUSE_PUBLIC_KEY=pk-lf-test\n"
+        "LANGFUSE_SECRET_KEY=sk-lf-test\n"
+        "LANGFUSE_HOST=http://langfuse-web:3000\n"
     )
     settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
     assert settings.openrouter_api_key.get_secret_value() == "test-key"
-    assert not hasattr(settings, "langfuse_public_key")
+    assert not hasattr(settings, "spellbook_base_url")
+    assert settings.langfuse_public_key == "pk-lf-test"
+    assert settings.langfuse_secret_key.get_secret_value() == "sk-lf-test"
+    assert settings.langfuse_host == "http://langfuse-web:3000"
 
 
 def test_settings_never_leaks_secret_in_repr_or_str(tmp_path, monkeypatch) -> None:

@@ -24,7 +24,7 @@ from mana_leak_api.main import app
 from mana_leak_core import gateway
 from mana_leak_core.contracts.enums import AuditEventType
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
-from mana_leak_core.contracts.events import TurnEvent
+from mana_leak_core.contracts.events import MessageEnd, MessageStart, TurnEvent
 from mana_leak_core.db.models import AuditEvent
 from mana_leak_core.settings import Settings, get_settings
 from sqlalchemy import select
@@ -182,6 +182,37 @@ async def test_a_pre_stream_model_limit_exceeded_maps_to_an_error_response(
             "details": {"limit": "model_calls_max", "value": 8},
         }
     }
+
+
+async def test_the_whole_turn_runs_in_one_task_including_the_first_event(
+    client: httpx.AsyncClient,
+) -> None:
+    """F1 (`sse.py`): the SSE producer task must drive `process_turn` from
+    its very first `__anext__()` -- the request-handling task itself must
+    never call it -- so a value threaded through the generator's own call
+    stack (WP5's turn-level Langfuse span, the gateway's model-call-budget
+    contextvar) survives every event, including the first one, not only the
+    ones after it."""
+    tasks: list[int | None] = []
+
+    def _override() -> ProcessTurn:
+        async def process_turn(*args: object, **kwargs: object) -> AsyncIterator[TurnEvent]:
+            conversation_id, turn_id = uuid4(), uuid4()
+            tasks.append(id(asyncio.current_task()))
+            yield MessageStart(conversation_id=conversation_id, turn_id=turn_id, message_id=uuid4())
+            tasks.append(id(asyncio.current_task()))
+            yield MessageEnd(conversation_id=conversation_id, turn_id=turn_id)
+            tasks.append(id(asyncio.current_task()))
+
+        return process_turn
+
+    app.dependency_overrides[get_process_turn] = _override
+
+    response = await client.post(f"/conversations/{uuid4()}/messages", json={"content": "hi"})
+
+    assert response.status_code == 200
+    assert len(tasks) == 3
+    assert len(set(tasks)) == 1  # one task drove every __anext__(), including the first
 
 
 async def test_a_mid_stream_stall_ends_the_turn_with_the_model_call_timeout(

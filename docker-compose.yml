@@ -32,9 +32,21 @@ services:
       # back to the Settings class's http://localhost:3001) with the
       # self-hosted langfuse-web container's URL for the M2 Langfuse stack
       # (langfuse-web is part of this Compose file; see the stack block
-      # below). Set LANGFUSE_HOST in .env (e.g. to a Langfuse Cloud URL) to
-      # override this default without editing this file.
+      # below). Self-hosted only, permanently -- there is no Langfuse Cloud
+      # fallback. Set LANGFUSE_HOST in .env to override this default
+      # without editing this file.
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
+      # LANGFUSE_INIT_PROJECT_PUBLIC_KEY/_SECRET_KEY are the one source of
+      # truth (M2): they headlessly provision the Langfuse project below
+      # (see the langfuse-web environment), and the app's own keys fall
+      # back to those same values so a fresh .env with only the INIT_* pair
+      # set still authenticates on first boot. An explicit
+      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY in .env overrides the
+      # fallback; either genuinely unset leaves tracing disabled (FR-8,
+      # AC-6) -- `docker compose up postgres api web` alone (no Langfuse
+      # services) still resolves both to empty via the inner `:-`.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}}
     volumes:
       # Downloaded bulk card data (ingest_cards) and other runtime files;
       # excluded from the image by .dockerignore, kept on the host instead.
@@ -44,6 +56,11 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    # Compose's SIGKILL deadline must never cut short the bounded Langfuse
+    # shutdown-flush (tracing.shutdown(timeout_s=5.0), M2 WP3); the
+    # Dockerfile's CMD execs uvicorn as PID 1 so it receives SIGTERM
+    # directly instead of being killed by its shell wrapper.
+    stop_grace_period: 20s
     healthcheck:
       # No curl in the slim base image; urllib raises on a non-2xx/timeout,
       # which exits non-zero.
@@ -74,10 +91,160 @@ services:
       start_period: 15s
 
   # Langfuse stack (M2): self-hosted Langfuse (langfuse-web, langfuse-worker,
-  # clickhouse, redis/valkey, minio) following the current official Langfuse
-  # docker-compose for the pinned version. Langfuse must use the dedicated
-  # `langfuse` database/user created by scripts/postgres-init/01-databases.sh,
-  # never the `mana_leak` database.
+  # clickhouse, redis, minio), following the official langfuse/langfuse
+  # docker-compose.yml (main, re-verified 2026-10-02: images
+  # docker.langfuse.com/langfuse/langfuse:4 /
+  # docker.langfuse.com/langfuse/langfuse-worker:4,
+  # clickhouse/clickhouse-server:25.12, redis:7, cgr.dev/chainguard/minio).
+  # Uses the dedicated `langfuse` database/user created by
+  # scripts/postgres-init/01-databases.sh on the existing postgres service --
+  # never a second Postgres container, never the mana_leak database. api/web
+  # declare no depends_on on any of these (FR-8): `docker compose up
+  # postgres api web` alone must still reach healthy. Only langfuse-web is
+  # published to the host (127.0.0.1:3001); langfuse-worker, clickhouse,
+  # redis, and minio stay on the Compose-internal network only.
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    environment: &langfuse-worker-env
+      # Both langfuse-web (Next.js standalone server.js) and this worker's
+      # own HTTP server default to Node's own `os.hostname()` -- Docker's
+      # auto-assigned container ID -- when HOSTNAME is unset, which only
+      # binds the container's own network IP, never 127.0.0.1 (verified
+      # 2026-10-02: the wget healthchecks below connection-refused against
+      # loopback until this is set). Same fix as apps/web/Dockerfile.
+      HOSTNAME: "0.0.0.0"
+      # F5: overrides the official default of http://localhost:3000, which
+      # would redirect a post-login browser to Mana Leak's own web service.
+      NEXTAUTH_URL: http://localhost:3001
+      # F10: never ${DATABASE_URL} -- that is the app's own
+      # postgresql+psycopg://.../mana_leak URL; Langfuse's Prisma schema
+      # needs the plain postgresql:// scheme and its own `langfuse`
+      # database/user.
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@postgres:5432/langfuse
+      SALT: ${SALT:?set SALT in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env, 64 hex chars}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      # Explicit, not just the bash-side ${:-false}: this image's own
+      # internal default differs when the var is absent entirely, and
+      # issues ClickHouse migrations with `ON CLUSTER default` against a
+      # non-clustered ClickHouse (verified 2026-10-02: fails with "no
+      # Zookeeper configuration").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH:?set REDIS_AUTH in .env}
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3030/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # Headless provisioning (AC-2): langfuse-web creates this org/
+      # project/key pair on first boot, no manual UI step. api's
+      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY fall back to the same pair
+      # (above) so the app authenticates immediately.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  redis:
+    image: docker.io/redis:7
+    command: >
+      --requirepass ${REDIS_AUTH:?set REDIS_AUTH in .env}
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    entrypoint: sh
+    # Creates the 'langfuse' bucket before starting the service.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
 
 volumes:
   postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-redis-data:
+  langfuse-minio-data:

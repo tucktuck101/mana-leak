@@ -741,6 +741,13 @@ Do not place secrets in:
 - screenshots;
 - test snapshots.
 
+Agent tool output counts as a log: it lands in session transcripts. Never run a command whose output can contain resolved secrets, and never rely on a regex to redact them. In particular:
+
+- never `cat`, `grep`, `sed` or `source` `.env`;
+- never print `docker compose config` output. Use `docker compose config -q` to validate, or `docker compose config --format json | jq` to extract keys, structure or ports, never values;
+- never print `env`, `printenv`, `docker inspect` or container environment;
+- in tests, compare secret values through `SecretStr.get_secret_value()` against dummies, never against real config.
+
 ---
 
 # 23. Test deterministic behaviour deterministically

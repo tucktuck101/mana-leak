@@ -38,15 +38,14 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
       # LANGFUSE_INIT_PROJECT_PUBLIC_KEY/_SECRET_KEY are the one source of
       # truth (M2): they headlessly provision the Langfuse project below
-      # (see the langfuse-web environment), and the app's own keys fall
-      # back to those same values so a fresh .env with only the INIT_* pair
-      # set still authenticates on first boot. An explicit
-      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY in .env overrides the
-      # fallback; either genuinely unset leaves tracing disabled (FR-8,
-      # AC-6) -- `docker compose up postgres api web` alone (no Langfuse
-      # services) still resolves both to empty via the inner `:-`.
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}}
+      # (see the langfuse-web environment), and the app's keys are those
+      # same values. They are never taken from the shell: Compose lets shell
+      # variables override .env, and a developer's shell may hold keys for an
+      # unrelated Langfuse. If the INIT pair is unset, tracing is disabled
+      # (FR-8, AC-6); `docker compose up postgres api web` alone (no Langfuse
+      # services) still resolves both to empty.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
     volumes:
       # Downloaded bulk card data (ingest_cards) and other runtime files;
       # excluded from the image by .dockerignore, kept on the host instead.

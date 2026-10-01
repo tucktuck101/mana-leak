@@ -4,7 +4,7 @@ Mana Leak is a local-first, EDH-focused AI assistant for card search, Commander 
 
 Built as a **24-hour solo buildathon** project. The target is **local execution only** via Docker Compose; no public deployment.
 
-**Status:** M1 walking skeleton implemented — persisted, resumable, streamed chat conversation end to end (Postgres, FastAPI SSE, turn orchestrator, model gateway, Next.js UI). No card, combo, rules, or judge capability yet.
+**Status:** M1 walking skeleton and M2 observability implemented — persisted, resumable, streamed chat conversation end to end (Postgres, FastAPI SSE, turn orchestrator, model gateway, Next.js UI), every turn traced in a self-hosted Langfuse instance (one trace per turn, grouped by conversation), degrading safely when Langfuse is unreachable or unconfigured. No card, combo, rules, or judge capability yet.
 
 ## Prerequisites
 
@@ -13,24 +13,28 @@ Built as a **24-hour solo buildathon** project. The target is **local execution 
 - Node.js 22+ and npm
 - An OpenRouter API key
 
-## Quick start
-
 ```bash
-cp .env.example .env   # fill in values (OPENROUTER_API_KEY, CHAT_MODEL, DB passwords)
+cp .env.example .env   # fill in values (OPENROUTER_API_KEY, CHAT_MODEL, DB passwords, Langfuse keys/stack secrets)
 make setup              # local Python + web dependencies
 make test                # unit/integration tests (live tests only if OPENROUTER_API_KEY is set)
-make docker-up           # postgres + api + web, built and started via Compose
+make docker-up           # postgres + api + web + the self-hosted Langfuse stack, built and started via Compose
 ```
 
 Open `http://localhost:3000` in a browser: create a conversation, send a message, and watch the
 assistant's answer stream in. Reload the page to confirm the conversation persists; continue it
 with another message.
 
+`.env.example` documents every Langfuse variable: the app's own `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST` (optional — tracing is disabled, and chat still answers, until both keys are set), the `LANGFUSE_INIT_*` pair that headlessly provisions the project on first boot, and the Langfuse-stack-only secrets (`NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, `CLICKHOUSE_PASSWORD`, `REDIS_AUTH`, `MINIO_ROOT_PASSWORD`). With `LANGFUSE_INIT_*` filled in, open `http://localhost:3001` after `make docker-up` to inspect every turn as a trace grouped under its conversation's session, with no manual project-creation step.
+
 `make e2e` runs the full Compose stack end to end (`tests/e2e/run.sh`): brings up
-`postgres`/`api`/`web`, waits for all three to report healthy, streams a chat turn through the
-Next.js proxy, restarts `postgres` and `api` to prove persistence survives a container restart,
-and aborts a stream mid-turn to prove partial text is persisted with its error payload. It leaves
-the stack running afterward; use `make docker-down` to stop it.
+`postgres`/`api`/`web` plus the Langfuse stack, waits for all eight services to report healthy,
+streams a chat turn through the Next.js proxy and polls Langfuse's own query API for that turn's
+trace under its conversation's session, restarts `postgres` and `api` to prove persistence
+survives a container restart, aborts a stream mid-turn to prove partial text is persisted with
+its error payload, stops `langfuse-web` to prove a turn is unaffected and `/health` reports
+`langfuse: "unavailable"`, and finally stops `api` after one more turn to prove that turn's trace
+survives the shutdown-time flush. It leaves the stack running afterward; use `make docker-down`
+to stop it.
 
 Other commands: `make dev` (run API + web locally without Docker), `make lint`, `make format`,
 `make docker-down`.

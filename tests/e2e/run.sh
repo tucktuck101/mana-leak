@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # `make e2e` target (Makefile, WP7). Full-stack end-to-end check for M1
-# (docs/prds/M1-walking-skeleton.plan.md -> WP8 row/checklist): brings up
-# the real Compose stack, waits for postgres/api/web to report healthy,
-# then runs tests/e2e/run.py, which drives the chat/restart/abort flow
-# entirely through the Next.js proxy (http://localhost:3000/api/...), and
-# finally the browser regression test (apps/web/e2e), which drives the same
-# stack with a real Chromium.
+# (docs/prds/M1-walking-skeleton.plan.md -> WP8 row/checklist) and M2
+# (docs/prds/M2-observability.plan.md -> WP7 row/checklist): brings up the
+# real Compose stack -- postgres/api/web plus the self-hosted Langfuse stack
+# (langfuse-web, langfuse-worker, clickhouse, redis, minio) -- waits for all
+# eight services to report healthy, then runs tests/e2e/run.py, which drives
+# the chat/restart/abort/Langfuse-trace/degradation/shutdown-flush flow
+# entirely through the Next.js proxy (http://localhost:3000/api/...) plus
+# Langfuse's own query API, and finally the browser regression test
+# (apps/web/e2e), which drives the same stack with a real Chromium.
 #
-# Does not tear the stack down on exit (per-WP checklist: WP8 is the only
-# lane that runs the full stack, and it leaves it running). Does not use
-# `docker compose down -v` at any point: Postgres may already be running
+# Does not tear the stack down on exit (per-WP checklist: WP7/WP8 is the
+# only lane that runs the full stack, and it leaves it running). Does not
+# use `docker compose down -v` at any point: Postgres may already be running
 # with data other lanes/tests depend on.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-echo "==> docker compose up -d --build (postgres, api, web)"
-docker compose up -d --build postgres api web
+echo "==> docker compose up -d --build (postgres, api, web, Langfuse stack)"
+docker compose up -d --build postgres api web langfuse-web langfuse-worker clickhouse redis minio
 
 echo "==> running tests/e2e/run.py"
 uv run python3 tests/e2e/run.py

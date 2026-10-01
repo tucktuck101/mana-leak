@@ -26,26 +26,41 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://mana_leak:${MANA_LEAK_DB_PASSWORD}@postgres:5432/mana_leak
+      # Overrides the host-default LANGFUSE_HOST=http://localhost:3001 from
+      # .env, which from inside this container would resolve to itself. Points
+      # at the langfuse-web container's URL for when the self-hosted Langfuse
+      # stack is added in M10 (langfuse-web is not yet part of this Compose
+      # file); tracing stays disabled until then because
+      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY are unset.
+      LANGFUSE_HOST: http://langfuse-web:3000
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   web:
     build:
       context: apps/web
     environment:
+      # Server-side only: used by the Next.js /api proxy route handler to reach
+      # the API. Never exposed to the browser (no NEXT_PUBLIC_ prefix).
       API_BASE_URL: http://api:8000
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
 
-  # NEXT INFRASTRUCTURE TASK: self-hosted Langfuse stack.
-  # Add langfuse-web, langfuse-worker, clickhouse, redis/valkey and minio
-  # following the current official Langfuse docker-compose for the pinned version.
-  # Langfuse must use the dedicated `langfuse` database/user created by
+  # Langfuse stack is added in M10: self-hosted Langfuse (langfuse-web,
+  # langfuse-worker, clickhouse, redis/valkey, minio) following the current
+  # official Langfuse docker-compose for the pinned version. Langfuse must use
+  # the dedicated `langfuse` database/user created by
   # scripts/postgres-init/01-databases.sh, never the `mana_leak` database.
 
 volumes:

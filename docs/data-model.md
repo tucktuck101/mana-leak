@@ -110,7 +110,7 @@ One row per Commander Spellbook variant (the record users see as a combo). Cache
 | `results` | jsonb | no | Array of strings (the "produces" features, e.g. `"Infinite copies of Kiki-Jiki"`) |
 | `legal_commander` | boolean | yes | Spellbook legality flag when present |
 | `card_names` | text[] | no | Canonical names of pieces, denormalised for display |
-| provenance | | | `source='commander_spellbook'`, `source_url` = combo page URL, `source_version` = Spellbook `updated` timestamp or `fixture-<date>`, `retrieved_at` |
+| provenance | | | `source='commander_spellbook'`, `source_url` = combo page URL, `source_version` = Spellbook bulk `version` string (falling back to `retrieved_at`'s date) for live fetches, `fixture-<date>` for fixture loads, `retrieved_at` |
 
 Not stored: Spellbook popularity/deck counts, prices, and variant-of/alias graphs.
 
@@ -123,7 +123,7 @@ Membership of cards in combos. Spellbook can reference a card that is missing fr
 | `combo_id` | text | no | FK → `combo.id`, `ON DELETE CASCADE` |
 | `card_name` | text | no | Canonical card name as Spellbook gives it |
 | `card_name_normalized` | text | no | Same normalisation as `card.name_normalized` |
-| `oracle_id` | uuid | yes | FK → `card.oracle_id`, `ON DELETE SET NULL`; resolved at upsert by normalised name |
+| `oracle_id` | uuid | yes | FK → `card.oracle_id`, `ON DELETE SET NULL`; resolved at upsert from the live response's `uses[].card.oracleId`, falling back to normalised-name lookup for cache/fixture records without it |
 | `quantity` | smallint | no | Default 1 |
 | `zone_locations` | text[] | yes | Spellbook starting zones (e.g. `{B}` battlefield, `{H}` hand) |
 
@@ -187,7 +187,7 @@ No status column: a conversation is open until deleted. Judge Mode state lives i
 | `turn_id` | uuid | no | Groups one user message with its responses; shared with audit events and traces |
 | `role` | text | no | `user`, `assistant`, `tool` |
 | `content` | text | no | Display text (user input, assistant answer, or a one-line tool summary) |
-| `payload` | jsonb | yes | Structured data: for `assistant`, the structured result (e.g. card list, combo list, ruling id, clarification questions); for `tool`, `{tool, args, ok, result_ids, error}` |
+| `payload` | jsonb | yes | Structured data: for `assistant`, the `TurnResult` JSON (`CardsResult`, `CombosResult`, `Ruling`, or `NeedMoreInformation`, per `contracts.md`); a `Ruling` payload duplicates the `ruling` row by design, for display without a join; for `tool`, `{tool, args, ok, result_ids, error}` |
 | `route` | text | yes | Route chosen for the turn (`cards`, `combos`, `judge`, `other`); set on the assistant message |
 | `created_at` | timestamptz | no | |
 
@@ -204,7 +204,7 @@ Unique: (`conversation_id`, `seq`).
 | `status` | text | no | `active`, `completed`, `exhausted`, `abandoned` |
 | `question` | text | no | Original user question that opened the session |
 | `known_facts` | jsonb | no | Array of `{fact, source_turn_id}`, the game-state facts established so far |
-| `missing_facts` | jsonb | no | Array of strings: facts still needed |
+| `missing_facts` | jsonb | no | Array of strings: facts still needed; max 3 (matches `SufficiencyDecision.missing_facts` and `NeedMoreInformation`), each surfaced as a clarification question |
 | `clarification_count` | smallint | no | Default 0; `CHECK (clarification_count BETWEEN 0 AND 3)` |
 | `card_oracle_ids` | uuid[] | no | Cards identified for the question so far |
 | `created_at`, `updated_at` | timestamptz | no | |
@@ -245,12 +245,12 @@ The structured judge output. It holds the displayed explanation and *references*
 **Citation reference** (one element of `citations`):
 
 ```json
-{ "type": "rule",  "ref": "702.19c", "chunk_id": "<rule_chunk.id>", "quote": "<≤300 chars>" }
-{ "type": "card",  "ref": "<oracle_id>", "name": "Kiki-Jiki, Mirror Breaker" }
-{ "type": "combo", "ref": "<combo.id>" }
+{ "type": "rule",  "ref": "702.19c", "chunk_id": "<rule_chunk.id>", "quote": "<≤300 chars>", "rules_version": "<rule_chunk.rules_version>" }
+{ "type": "card",  "ref": "<oracle_id>", "name": "Kiki-Jiki, Mirror Breaker", "source_version": "<card.source_version>" }
+{ "type": "combo", "ref": "<combo.id>", "source_version": "<combo.source_version>" }
 ```
 
-`type` is one of `rule`, `card`, `combo`. `ref` must identify a record that was retrieved during the producing turn; the application verifies this before saving (see `architecture.md`). The short `quote` lets a ruling be shown and audited even after the rules index is replaced; full card or rule text is not copied.
+`type` is one of `rule`, `card`, `combo`. `ref` must identify a record that was retrieved during the producing turn; the application verifies this before saving (see `architecture.md`). `rules_version` (rule citations) and `source_version` (card/combo citations) record the version in force when that citation was made, independent of the ruling-level `rules_version`/`card_source_version` columns. The short `quote` lets a ruling be shown and audited even after the rules index is replaced; full card or rule text is not copied.
 
 Three layers stay distinct: `summary`/`explanation` (what the user reads), `rule_numbers`/`card_oracle_ids`/`citations` (structured references), and `card`/`rule_chunk`/`combo` (the source data).
 
@@ -296,7 +296,7 @@ Append-only. One row per case execution; a group of rows sharing `run_group_id` 
 | `config` | jsonb | no | Other settings: router/embedding/grader models, limits, `rules_version`, `card_source_version` |
 | `app_version` | text | yes | Git commit SHA when available |
 | `output` | jsonb | yes | Candidate output (route, tools called, structured result, final text) |
-| `scores` | jsonb | no | `{schema_valid, route_correct, tool_success, retrieval_hit, citation_valid, semantic_correct, safeguard_pass, judge_flow_ok}`; keys present only where applicable; values boolean or 0–1 |
+| `scores` | jsonb | no | `{schema_valid, route_correct, tool_success, retrieval_hit, citation_valid, citation_relevant, semantic_correct, safeguard_pass, judge_flow_ok}`; keys present only where applicable; values boolean or 0–1 |
 | `grader` | jsonb | yes | LLM-grader model, verdict, rationale |
 | `passed` | boolean | no | Case-level pass by the suite's rule |
 | `error` | jsonb | yes | `{type, message}` for unhandled exceptions or controlled failures |
@@ -425,7 +425,7 @@ Rulings keep `rules_version`, `card_source_version`, rule numbers, and short quo
 ## Not persisted
 
 - API keys, secrets, or credentials (environment only).
-- Full raw model prompts, and any prompt that may contain secrets (Langfuse captures traces with redaction).
+- Full raw model prompts: the app DB stores no prompts; Langfuse stores generation input/output in its own local stores; secrets never enter prompts.
 - Streaming token deltas.
 - Complete raw external HTTP responses (only the mapped fields above).
 - Filesystem or shell data.

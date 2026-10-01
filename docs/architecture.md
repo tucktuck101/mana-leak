@@ -96,7 +96,7 @@ flowchart TB
 
 | Container | Responsibility | Must not |
 |---|---|---|
-| **web** | Render chat, stream assistant output, list and resume conversations, display structured rulings and citations. Talks only to the API. | Call models, databases, or external sources; contain domain logic. |
+| **web** | Render chat, stream assistant output, list and resume conversations, display structured rulings and citations. The browser talks only to Next.js; a Next.js route handler proxies `/api/*` to `API_BASE_URL` server-side, with SSE streaming passthrough. | Call models, databases, or external sources; contain domain logic; expose the API directly to the browser. |
 | **api** | HTTP adapter: streamed chat endpoint, REST endpoints for conversations, cards, combos, rules, and health. Translates HTTP to core calls and core results/events to HTTP/SSE. | Implement search, retrieval, routing, or judging. |
 | **shared core** | All domain and application logic (below). A library, not a separate service. | Know about HTTP, SSE, CLI parsing, or MCP framing. |
 | **CLI** | Thin command-line adapter over the core, used for demos, ingestion, and evals. Runs on the host (or via `docker compose exec api`). | Duplicate core logic. |
@@ -132,19 +132,19 @@ flowchart LR
     llm[Model gateway<br/>LiteLLM] --- router & runner & judge & guard
 ```
 
-**Turn orchestrator.** The single entrypoint for a conversational turn, used by every adapter. It sequences screening, context building, routing, the tool loop or judge, persistence, and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
+**Turn orchestrator.** `process_turn` is the single entrypoint for a conversational turn, used by every adapter — including CLI `judge` and MCP `judge`, which call it with the route forced to `judge` so both get the same screening, persistence, and continuation semantics as web. It sequences screening, context building, routing, the tool loop or judge, persistence, and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
 
 **Model gateway.** A small wrapper over LiteLLM/OpenRouter used by every model call. It applies the model timeout, the structured-output retry, and the transient-failure retries, and attaches tracing metadata. Model identifiers come from configuration.
 
 **Card service.** Deterministic structured search and exact lookup over local card data: name, Oracle text, type line, colour identity, mana value, keywords, Commander legality. Lookup resolves exact names first, then a deterministic fuzzy name match. Results carry source and version metadata. No model generates or rewrites card data, and card search does not use embeddings.
 
-**Combo service.** Queries Commander Spellbook to find known combos involving supplied cards and to search combos. It returns structured pieces, prerequisites, steps, results, and the Spellbook record identifier. Responses may be cached in the application database; a versioned fixture set is the fallback. The model never presents a combo as "known" unless it came from this service.
+**Combo service.** Queries Commander Spellbook to find known combos involving supplied cards and to search combos. It returns structured pieces, prerequisites, steps, results, and the Spellbook record identifier, with each result carrying its `source` (`live`, `cache`, or `fixture`). Responses may be cached in the application database; a versioned fixture set is the fallback. If Spellbook is unavailable and neither the cache nor the fixtures cover the requested cards, the service reports `dependency_unavailable` rather than an empty list; a genuinely empty live result is phrased as "no known combo in Commander Spellbook," never "these cards don't combo." The model never presents a combo as "known" unless it came from this service.
 
 **Rules ingestion.** An offline pipeline, run by command rather than at startup. It downloads the current Comprehensive Rules, parses them along the document's own hierarchy, chunks by rule, generates embeddings, and stores chunks with provenance. Re-ingestion replaces the indexed rule set for the new version. It is separate from runtime retrieval.
 
 **Rules retrieval.** Runtime search over indexed rule chunks: pgvector semantic search, PostgreSQL full-text search, and direct lookup by rule number. It returns at most 8 chunks, each with a stable rule number and provenance for citation.
 
-**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer. An active Judge session overrides routing: the turn goes to the judge as a clarification answer unless the user clearly abandons it.
+**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer. With an active Judge session, routing is skipped: deterministic cancel phrases ("cancel", "never mind", "stop") abandon the session without a model call; otherwise one bounded model call returns a `ContinuationDecision` (`answer`, `new_question`, or `abandon`). `answer` adds the message to known facts and re-judges; `new_question` abandons the old session and starts a new judge flow; `abandon` abandons the session and routes the turn normally.
 
 **Tool runner.** The bounded tool-calling loop. It exposes only the route's allowlisted tools to the model, validates every tool call's arguments against its schema, executes the matching core service, shapes and truncates results, and returns failures to the model as structured tool errors instead of raising. It stops after 5 tool steps.
 
@@ -152,7 +152,7 @@ flowchart LR
 |---|---|
 | `cards` | card search, card lookup |
 | `combos` | card lookup, combo search, combo find, combo get |
-| `judge` | card lookup, rules search, combo find (only when the question concerns a known combo) |
+| `judge` | none (judge calls card lookup, rules search, combo find in code) |
 | `other` | none |
 
 **Judge service.** Produces rulings. It gathers card evidence and rules evidence (and combo records where relevant), runs a bounded sufficiency decision on whether the evidence and stated game state support a ruling, and either produces a validated structured ruling or asks for clarification. Ruling statuses are `legal`, `illegal`, `conditional`, and `insufficient_information`. After generation, code checks citations: every cited rule number, card, and combo must appear in the evidence actually retrieved for that turn. A ruling with an unverifiable citation is rejected (one regeneration attempt, then a controlled `insufficient_information`).
@@ -163,9 +163,9 @@ flowchart LR
 
 **Conversation service.** Persists conversations and messages, supports resume after reload, and builds the bounded model context. The conversation ID is the Langfuse session ID and is attached to Judge sessions, rulings, and audit events.
 
-**Safeguards.** Input screening (length cap, malformed input, a bounded classifier returning `clear`, `suspicious`, or `uncertain`), separation of instructions from data in prompts, tool allowlists, secret redaction in prompts, logs, and errors, and hard execution limits. Code decides the consequence of a screening result: continue, continue with heightened restriction, or refuse safely.
+**Safeguards.** Input screening (length cap, malformed input, a bounded classifier returning `clear`, `suspicious`, or `uncertain`), separation of instructions from data in prompts, tool allowlists, ensuring secrets never enter prompts, logs, or error messages, and hard execution limits. Code decides the consequence of a screening result: continue, continue with heightened restriction, or refuse safely.
 
-**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down.
+**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down. The application database stores no prompts; Langfuse stores generation input/output (full prompts and completions) in its own local stores, separate from `mana_leak`. Secrets never enter prompts, so there is nothing for Langfuse to redact.
 
 ## Request flows
 
@@ -236,15 +236,16 @@ stateDiagram-v2
     [*] --> Evaluating: judge question
     Evaluating --> Ruled: sufficient
     Evaluating --> AwaitingClarification: insufficient (persist session, ask)
-    AwaitingClarification --> Evaluating: user answers (update facts, round += 1)
-    AwaitingClarification --> Abandoned: user changes topic
+    AwaitingClarification --> Evaluating: continuation=answer (update facts, round += 1)
+    AwaitingClarification --> Abandoned: continuation=abandon (cancel phrase or model)
+    AwaitingClarification --> Abandoned: continuation=new_question (old session abandoned, new judge flow starts)
     Evaluating --> Exhausted: insufficient and round = 3
     Ruled --> [*]: close session
     Exhausted --> [*]: insufficient_information
     Abandoned --> [*]
 ```
 
-Code increments the clarification count and decides the transition; the model only proposes missing facts and clarification wording.
+Code increments the clarification count and decides the transition; the model only proposes missing facts, clarification wording, and the continuation classification.
 
 ### Evaluation
 
@@ -364,24 +365,10 @@ When context grows too large, older turns are summarised and recent turns plus J
 
 ## Operational boundaries
 
-| Limit | Value | Enforced by |
-|---|---:|---|
-| Tool steps per turn | 5 | Tool runner |
-| Model calls per turn (target / absolute) | 3 / 5 | Orchestrator |
-| Structured-output retry | 1 | Model gateway |
-| Transient external retries | 2 | Model gateway, combo service |
-| External HTTP timeout | 10 s | HTTP clients |
-| Model-call timeout | 30 s | Model gateway |
-| Overall turn timeout | 60 s | Orchestrator |
-| Rule chunks to model | 8 | Rules retrieval |
-| Card results to model | 10 | Card service / tool runner |
-| Combo results to model | 10 | Combo service / tool runner |
-| Tool-result text | ~8,000 chars | Tool runner |
-| Judge clarification rounds | 3 | Judge-session state |
-| Active context | last 10 turns + summary | Conversation service |
-| User message length | ~8,000 chars | Safeguards |
-| Answer size target | ~1,500 tokens | Model gateway |
-| Eval concurrency | 5 workers | Eval harness |
+Numeric limits (tool steps, retries, timeouts, result sizes, context window, eval concurrency) are defined once in `contracts.md` → "Operational limits"; this document does not repeat them. Two facts belong here because they are ownership decisions, not interface ones:
+
+- **Overall turn timeout:** 120 s, enforced by the orchestrator.
+- **Model calls per turn:** the orchestrator owns the per-turn counter; the model gateway increments it on every completion call (screening, continuation/routing, sufficiency, drafts, retries, summarisation, tool-loop calls) — embeddings are not counted. Target ≤3 per turn (soft; a typical judge turn is ~4); absolute cap 8 (hard — 5 tool calls + final answer + screening + routing fits).
 
 There is no monetary spend cap. Token and cost metadata are observed through Langfuse.
 
@@ -391,7 +378,8 @@ Every failure produces a controlled result and an audit event; nothing hangs or 
 
 | Failure | Behaviour |
 |---|---|
-| Commander Spellbook unavailable | Serve from cache, then from the versioned fixture set; the response states it is using cached data. |
+| Commander Spellbook unavailable | Serve from cache, then the versioned fixture set (result `source: cache`/`fixture`); if neither covers the requested cards, return `dependency_unavailable` ("combo data unavailable") rather than an empty list. |
+| No known combo for requested cards (live, empty result) | Answer states "no known combo in Commander Spellbook"; never "these cards don't combo". |
 | Embeddings / semantic search unavailable | Fall back to PostgreSQL full-text and rule-number lookup; the trace records the degraded mode. |
 | Langfuse unavailable | Tracing becomes a no-op; answers continue; audit events still persist locally. |
 | Source refresh unavailable | Use previously ingested card and rules data; startup never downloads sources. |
@@ -409,7 +397,7 @@ Docker Compose on `localhost` is the only deployment target. `docker compose up 
 - **postgres**: PostgreSQL 16 + pgvector, named volume, health check. An init script creates the `mana_leak` and `langfuse` databases with separate users and enables `vector` only in `mana_leak`.
 - **api**: FastAPI, depends on a healthy `postgres`, and reaches it through the Compose network.
 - **web**: Next.js standalone build; calls the API.
-- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. This is the next infrastructure task; the current `docker-compose.yml` marks the slot.
+- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. Added in M10, not before; the current `docker-compose.yml` marks the slot until then. If self-hosting exceeds a 2-hour time box in M10, fall back to a Langfuse Cloud project using the same SDK (emergency fallback only, never the default plan).
 - **CLI and MCP** run from the same Python environment as the API: on the host via `uv`, or inside the api container.
 - Data import and rules ingestion are explicit commands run before the demo. Imported data persists in the named Postgres volume. Bulk downloads stay in the git-ignored `data/` directory.
 
@@ -433,7 +421,7 @@ Fields, keys, and indexes are defined in `data-model.md`.
 
 - **Internal Python interfaces:** typed core service functions; the canonical contract that every adapter calls.
 - **LLM tool schemas:** generated from the same Pydantic argument models as the core interfaces.
-- **FastAPI:** REST for conversations and direct domain queries; a streaming chat endpoint over SSE compatible with the AI SDK `useChat` stream protocol.
+- **FastAPI:** REST for conversations and direct domain queries; a streaming chat endpoint over SSE using Mana Leak's own `TurnEvent` format. No CORS: only the Next.js route handler proxy calls it directly. The AI SDK is optional and not adopted; a chat library would adapt to this format in the web layer.
 - **CLI:** commands for search, combos, rules, judge, chat, ingestion, and evals.
 - **MCP:** FastMCP tools mirroring the core tool set.
 
@@ -445,7 +433,7 @@ Evaluation is a first-class part of the system but is separate from runtime auth
 
 | Suite | Size |
 |---|---:|
-| Smoke (10 MTG-QA, 5 current-rules, 5 routing/tool, 5 adversarial) | 25 |
+| Smoke (10 mtg_qa, 5 current_rules, 5 routing_tool, 5 adversarial, 3 judge_mode) | 28 |
 | MTG-QA development | 200 |
 | MTG-QA held-out (final evaluation only) | 100 |
 | Current-rules gold | 20 |
@@ -454,7 +442,9 @@ Evaluation is a first-class part of the system but is separate from runtime auth
 | Adversarial/safeguard | 15 |
 | Stateful Judge mode | 10 |
 
-The harness records model, prompt, and configuration versions with every run, so results are comparable. Gates, scoring, and run cadence are defined in the M9 PRD (thresholds in `mana-leak-context.md`).
+The 3 `judge_mode` smoke cases are one completed ruling, one exhausted (clarification rounds used up), and one abandoned continuation.
+
+The harness records model, prompt, and configuration versions with every run, so results are comparable. Gate thresholds and blockers are defined in `contracts.md` → "Evaluation contracts" → "Gates"; run cadence is defined in the M9 PRD.
 
 ## Architectural decisions
 

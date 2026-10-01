@@ -28,9 +28,10 @@ Other commands: `make dev`, `make lint`, `make format`, `make docker-down`.
 
 ## Documentation
 
-- [Project context](mana-leak-context.md)
+- [Agent operating model](AGENTS.md)
 - [Vision](docs/vision.md)
 - [Architecture](docs/architecture.md)
 - [Data model](docs/data-model.md)
 - [Contracts](docs/contracts.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Project context](mana-leak-context.md) — historical input that shaped the design; not an authority (see `AGENTS.md` §3)

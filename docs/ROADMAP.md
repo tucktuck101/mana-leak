@@ -41,22 +41,23 @@ This is a solo 24-hour build. Milestones are sized so the core sequence fits tha
 
 ## Roadmap summary
 
-| Milestone | Outcome | Depends on | Status |
-|---|---|---|---|
-| M1 — Card knowledge foundation | Deterministic search and inspection of current card data | Design docs, repository scaffold | Not Started |
-| M2 — Known Commander combos | Discover and explain known combos from structured data | M1 | Not Started |
-| M3 — Current rules knowledge | Retrieve cited current Comprehensive Rules evidence | Repository scaffold | Not Started |
-| M4 — Evidence-grounded Rules Judge | Structured, cited rulings from card and rules evidence | M1, M3 (M2 for combo-related questions) | Not Started |
-| M5 — Unified assistant orchestration | One natural-language entrypoint with routing and bounded tools | M2, M4 | Not Started |
-| M6 — Persistent conversational application | Persisted, streamed conversations through the API | M5 | Not Started |
-| M7 — Browser product experience | Core experience usable in the web UI | M6 | Not Started |
-| M8 — Stateful Judge clarification | Multi-turn resolution of missing game state | M6, M7 | Not Started |
-| M9 — Quality, evaluation, and safeguards | Measured, gated behaviour across all suites | M3, M4, M5, M8 | Not Started |
-| M10 — Observability | End-to-end Langfuse traces, degrading safely | M5, M9 | Not Started |
-| M11 — Shared-core interface completion | CLI and MCP parity over the same core | M5, M8 | Not Started |
-| M12 — Demo hardening | Repeatable full demo from a clean local start | M9, M10, M11 | Not Started |
+| Milestone | Outcome | Hours | Depends on | Status |
+|---|---|---|---|---|
+| M1 — Card knowledge foundation | Deterministic search and inspection of current card data | 2 | Design docs, repository scaffold | Not Started |
+| M2 — Known Commander combos | Discover and explain known combos from structured data | 1.5 | M1 | Not Started |
+| M3 — Current rules knowledge | Retrieve cited current Comprehensive Rules evidence | 2.5 | Repository scaffold | Not Started |
+| M4 — Evidence-grounded Rules Judge | Structured, cited rulings from card and rules evidence | 3 | M1, M3 (M2 for combo-related questions) | Not Started |
+| M5 — Unified assistant orchestration | One natural-language entrypoint with routing and bounded tools | 2 | M2, M4 | Not Started |
+| M6 — Persistent conversational application | Persisted, streamed conversations through the API | 2 | M5 | Not Started |
+| M7 — Browser product experience | Core experience usable in the web UI | 2.5 | M6 | Not Started |
+| M8 — Stateful Judge clarification | Multi-turn resolution of missing game state | 2 | M6, M7 | Not Started |
+| M9 — Quality, evaluation, and safeguards | Measured, gated behaviour across all suites | 2.5 | M3, M4, M5, M8 | Not Started |
+| M10 — Observability | End-to-end Langfuse traces, degrading safely | 1.5 | M5, M9 | Not Started |
+| M11 — Shared-core interface completion | CLI and MCP parity over the same core | 1 | M5, M8 | Not Started |
+| M12 — Demo hardening | Repeatable full demo from a clean local start | 1.5 | M9, M10, M11 | Not Started |
+| **Total** | | **24** | | |
 
-Status vocabulary: `Not Started`, `In Progress`, `Complete`, `Blocked`. The completed repository scaffold and design documents do not count toward M1.
+Status vocabulary: `Not Started`, `In Progress`, `Complete`, `Blocked`. The completed repository scaffold and design documents do not count toward M1. Hours are per-milestone target budgets summing to 24; they are not hard stops — the checkpoint rule below is the schedule safety net.
 
 ## Milestone progression
 
@@ -335,6 +336,8 @@ After M5, all of these work through the shared core:
 
 The application intelligence is complete. The product interface is not.
 
+**Checkpoint rule:** if Checkpoint B is not reached by hour 12, apply the Emergency minimum (below) to the remaining milestones.
+
 ---
 
 ## M6 — Persistent conversational application
@@ -394,7 +397,8 @@ The browser is the primary interface in the vision and the demo. It follows M6 s
 - Rendering of streamed responses.
 - Display of card and combo results, rulings, and citations.
 - Loading and error states.
-- Consumption of the canonical stream contract, with translation in the web layer if a chat library is used.
+- A Next.js route handler proxy (`/api/*`) that forwards requests to `API_BASE_URL` server-side, with SSE streaming passthrough; the browser never calls the API directly.
+- Consumption of Mana Leak's own SSE stream contract (no AI SDK protocol compatibility is claimed).
 
 ### Depends on
 M6.
@@ -426,6 +430,7 @@ Mana Leak resolves rules questions that depend on missing game state across mult
 - Known and missing game-state facts.
 - Targeted clarification questions.
 - Continuation on the next turn, and abandonment when the topic changes.
+- Deterministic cancel phrases abandon the session without a model call; otherwise one bounded continuation call decides answer, new question, or abandon.
 - Bounded clarification rounds with completion and exhaustion outcomes.
 - Clarification display and answering in the web UI.
 - The Judge-mode evaluation suite.
@@ -478,6 +483,8 @@ search/identify card
 
 Mana Leak should now feel like the intended product.
 
+**Checkpoint rule:** if Checkpoint C is not reached by hour 18, apply the Emergency minimum (below) to the remaining milestones.
+
 ---
 
 ## M9 — Quality, evaluation, and safeguards
@@ -493,9 +500,9 @@ The full behaviour set only exists after M8. Earlier milestones add their own su
 - Current-rules gold cases.
 - Completion of the retrieval, routing/tool, and Judge-mode suites.
 - Adversarial and safeguard cases, including the critical hard-gate cases.
-- The smoke suite.
+- The smoke suite (28 cases: 10 mtg_qa, 5 current_rules, 5 routing_tool, 5 adversarial, 3 judge_mode).
 - Deterministic and model-based grading, with versioned run records.
-- The project's threshold and blocker gating.
+- The project's threshold and blocker gating (full thresholds and blockers in `contracts.md` → Evaluation contracts → Gates).
 - Handling of stale historical cases without changing expected answers.
 - Safeguard fixes driven by adversarial results.
 
@@ -508,7 +515,7 @@ The developer can show measured results for routing, tool use, retrieval, rules 
 ### Success evidence
 - The smoke suite passes its gates with zero unhandled exceptions.
 - Development-set and gold-set results meet the agreed thresholds.
-- Critical adversarial cases pass at 100%, and there are no fabricated citations.
+- Critical adversarial cases pass at 100%; `citation_valid` is 100% (any failure is a code defect) and `citation_relevant` meets its gate on current_rules/judge_mode cases.
 - The held-out set is kept out of development runs and used only for final evaluation.
 
 Historical evaluation data remains evaluation-only and never becomes runtime evidence.
@@ -524,7 +531,7 @@ Running the full 145K corpus, chasing marginal historical-QA gains once gates pa
 The full assistant workflow is inspectable through self-hosted Langfuse.
 
 ### Why this milestone exists
-Tracing is required for the demo and makes M12 hardening faster. It comes after M9 so that evaluation runs are traced as well.
+Tracing is required for the demo and makes M12 hardening faster. It comes after M9 so that evaluation runs are traced as well. The Langfuse stack is deliberately built at this milestone, not earlier; any pre-M10 Compose slot for it is a placeholder only.
 
 ### Scope
 - A self-hosted Langfuse stack in local Compose, following current official conventions, on its own database.
@@ -571,6 +578,7 @@ The CLI grows from M1 onward. This milestone completes it and adds MCP, proving 
 ### Scope
 - A complete CLI surface, including chat, ingestion, evaluation, and structured JSON output.
 - The MCP server exposing the defined domain tools and the judge.
+- CLI `judge` and MCP `judge` both call the shared turn path (`process_turn`, route forced to `judge`), not a separate code path.
 - Consistent errors and exit behaviour across interfaces.
 - Verification that no interface duplicates domain logic.
 
@@ -668,6 +676,17 @@ select next roadmap milestone
 
 A milestone is `Complete` only when its demonstrable increment works and its success evidence holds. Unresolved demo-threatening blockers in the current milestone take priority over starting the next one.
 
+## Emergency minimum
+
+If Checkpoint B is not reached by hour 12, or Checkpoint C by hour 18, stop building the full version of the remaining milestones and build only the emergency minimum below, in order, leaving the rest of the time for M12.
+
+- **M8** — One clarification round only (same session semantics; the round cap is temporarily 1 instead of the normal 3).
+- **M9** — The smoke suite plus the critical adversarial cases only, with reduced case counts elsewhere; skip the remaining development/held-out volume.
+- **M10** — A Langfuse Cloud project instead of the self-hosted stack, if self-hosting exceeds a 2-hour time box. Same Langfuse SDK either way; this is an emergency fallback only, never the default plan.
+- **M11** — The MCP server exposes only the four read tools plus `judge`; the full CLI surface is cut first.
+
+Record any emergency minimum invoked in "Decisions & deviations" below.
+
 ## Cut strategy
 
 If time runs short, cut in this order:
@@ -711,3 +730,20 @@ card
 ```
 
 and also has persistent streamed web conversation, bounded routing and tool use, evaluation and safeguard evidence, Langfuse observability, CLI access, MCP access, and reliable local execution.
+
+## Decisions & deviations
+
+Amendment rule: when implementation evidence contradicts a design document, record the deviation here first, then update the owning document deliberately (per the authority tie-break in `AGENTS.md` §3), then update any downstream documents that assumed the old behaviour.
+
+### Round 1 — documentation repair pass
+
+1. Judge tools: code orchestrates all evidence lookups; the judge route exposes no tools to the model.
+2. Judge evidence: deterministic extraction of cards/rules from the current message and recent results; a bounded second pass fetches any rule numbers the draft cites but the ledger lacks, then redrafts once.
+3. Conditional rulings: a `conditional` draft with non-empty assumptions and clarification rounds remaining converts to `NeedMoreInformation`; `conditional` is otherwise allowed only with no assumptions or when rounds are exhausted.
+4. Continuation: an active Judge session skips the router; deterministic cancel phrases abandon without a model call; otherwise one bounded `ContinuationDecision` call resolves answer/new_question/abandon. CLI and MCP `judge` both go through `process_turn` with route forced to `judge`.
+5. Web topology: a Next.js route handler proxies `/api/*` to `API_BASE_URL` server-side with SSE streaming passthrough; no CORS on FastAPI.
+6. Streaming: Mana Leak keeps its own SSE format; no AI SDK protocol compatibility is claimed.
+7. Empty combos: results carry `source: live|cache|fixture`; a live miss with no cache/fixture coverage returns `dependency_unavailable`, never an empty list.
+8. Budgets: model-call cap 8 per turn (hard), 3 soft target; turn timeout 120 s (full limit list in `contracts.md`).
+9. Smoke suite: 28 cases (10 mtg_qa + 5 current_rules + 5 routing_tool + 5 adversarial + 3 judge_mode); `citation_valid` gate 100%, new `citation_relevant` gate ≥90%; full gate table lives in `contracts.md` → Evaluation contracts → Gates.
+10. Schedule: hour budget per milestone and the checkpoint/Emergency minimum rules above; Langfuse sequencing fixed to M10 (not an earlier "next infrastructure task").

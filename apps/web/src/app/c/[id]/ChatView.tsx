@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ConversationDetail, ErrorResponse, MessageOut } from "@/lib/contracts";
 import { parseEventStream } from "@/lib/sse";
@@ -9,53 +9,114 @@ interface ChatMessage {
   id: string;
   role: MessageOut["role"];
   content: string;
+  // An optimistic bubble shown before the server echoes the persisted
+  // message back with its own id (the stream announces the assistant
+  // message id only — contracts.md → Streaming events → `MessageStart`).
+  pending?: boolean;
 }
 
-type LoadState = "loading" | "ready" | "not_found" | "error";
+type HistoryState = "loading" | "ready" | "not_found" | "error";
+type Notice = { kind: "error" | "info"; text: string };
 
 export function ChatView({ conversationId }: { conversationId: string }) {
-  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [historyState, setHistoryState] = useState<HistoryState>("loading");
   const [title, setTitle] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
-  const [turnError, setTurnError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  // Refs, not state, for everything the turn loop reads while it runs: a send
+  // spans many awaits, and React state read from the enclosing render's
+  // closure would be stale by the time an event arrives.
   const abortRef = useRef<AbortController | null>(null);
+  const streamingRef = useRef(false);
+  const streamingMessageIdRef = useRef<string | null>(null);
+  const turnStartedRef = useRef(false);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Reconciles a history snapshot with what this mount already shows. The
+  // snapshot describes the conversation as of the moment its GET was issued,
+  // so it can be older than a turn that is already streaming: it must never
+  // remove the optimistic user bubble, truncate the answer being streamed, or
+  // show the user's message twice once the server's copy appears in it.
+  const mergeHistory = useCallback((serverMessages: MessageOut[]) => {
+    // Ascending seq, matching persistence (WP6 checklist), independent of the
+    // order the API happens to return.
+    const ordered = [...serverMessages].sort((a, b) => a.seq - b.seq);
+    setMessages((local) => {
+      const streamingId = streamingMessageIdRef.current;
+      const unmatchedPending = local.filter((m) => m.pending);
+      const merged: ChatMessage[] = [];
+      for (const server of ordered) {
+        if (server.id === streamingId) {
+          // The locally streamed text is newer than any snapshot of it.
+          const current = local.find((m) => m.id === streamingId);
+          merged.push(current ?? { id: server.id, role: server.role, content: server.content });
+          continue;
+        }
+        const pendingIndex = unmatchedPending.findIndex(
+          (p) => p.role === server.role && p.content === server.content,
+        );
+        if (pendingIndex !== -1) unmatchedPending.splice(pendingIndex, 1);
+        merged.push({ id: server.id, role: server.role, content: server.content });
+      }
+      const mergedIds = new Set(merged.map((m) => m.id));
+      for (const m of local) {
+        if (mergedIds.has(m.id)) continue;
+        // Dropped only when the snapshot already contains this exact message
+        // under its persisted id; anything else this turn produced is kept.
+        if (m.pending && !unmatchedPending.includes(m)) continue;
+        merged.push(m);
+      }
+      return merged;
+    });
+  }, []);
 
   // Load persisted history on mount (and after a reload) so the browser
-  // resumes the full conversation (FR-3, AC-2).
+  // resumes the full conversation (FR-3, AC-2). The composer is usable while
+  // this is in flight — a conversation created a moment ago has no history to
+  // wait for — so this can resolve mid-turn; it never aborts the turn and
+  // never replaces the streaming view with a load-failure screen.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await fetch(`/api/conversations/${conversationId}`);
-        if (res.status === 404) {
-          if (!cancelled) setLoadState("not_found");
-          return;
-        }
+        if (cancelled) return;
         if (!res.ok) {
-          if (!cancelled) setLoadState("error");
+          setHistoryState(
+            turnStartedRef.current ? "ready" : res.status === 404 ? "not_found" : "error",
+          );
           return;
         }
         const detail = (await res.json()) as ConversationDetail;
         if (cancelled) return;
         setTitle(detail.title);
-        // Ascending seq, matching persistence (WP6 checklist), independent
-        // of the order the API happens to return.
-        const ordered = [...detail.messages].sort((a, b) => a.seq - b.seq);
-        setMessages(ordered.map((m) => ({ id: m.id, role: m.role, content: m.content })));
-        setLoadState("ready");
+        mergeHistory(detail.messages);
+        setHistoryState("ready");
       } catch {
-        if (!cancelled) setLoadState("error");
+        if (!cancelled) setHistoryState(turnStartedRef.current ? "ready" : "error");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [conversationId]);
+  }, [conversationId, mergeHistory]);
 
-  // Abort any in-flight turn if the user navigates away.
+  // Abort an in-flight turn when the view really goes away. This is the only
+  // automatic abort: a re-render, a resolved history load, or a rejected send
+  // must never reach it, because the server treats a dropped connection as a
+  // client disconnect and truncates the persisted answer (contracts.md →
+  // Streaming events → Client disconnect).
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -75,34 +136,64 @@ export function ChatView({ conversationId }: { conversationId: string }) {
   }
 
   // The server sets `conversation.title` from the first user message
-  // (data-model.md -> conversation) but the heading is rendered from local
+  // (data-model.md → conversation) but the heading is rendered from local
   // state set on mount; refresh it from the authoritative source once the
-  // turn finishes instead of duplicating the server's title-derivation
-  // logic client-side (D2).
-  async function refreshConversationMeta() {
+  // turn settles instead of duplicating the server's title-derivation logic
+  // client-side (D2). Runs however the turn ended — a stopped or failed first
+  // turn still titles the conversation, so the heading must not wait for a
+  // reload.
+  const refreshTitle = useCallback(async () => {
     try {
       const res = await fetch(`/api/conversations/${conversationId}`);
       if (!res.ok) return;
       const detail = (await res.json()) as ConversationDetail;
-      setTitle(detail.title);
+      if (mountedRef.current) setTitle(detail.title);
     } catch {
-      // Best effort — the next reload will still show the right title.
+      // Best effort — the next turn or reload will still show the right title.
     }
+  }, [conversationId]);
+
+  async function readErrorMessage(res: Response): Promise<string> {
+    try {
+      const body = (await res.json()) as ErrorResponse;
+      if (body?.error?.message) return body.error.message;
+    } catch {
+      // Not an ErrorResponse (e.g. a proxy-level failure) — fall through.
+    }
+    return `The server rejected this message (HTTP ${res.status}).`;
   }
 
   async function sendMessage() {
     const content = input.trim();
-    if (!content || streaming) return;
+    // Synchronous guard: two clicks in the same frame both see `streaming`
+    // from the render that produced them, so the ref decides. A send that
+    // cannot proceed says why and leaves the text where the user typed it —
+    // no message is ever silently dropped.
+    if (streamingRef.current) {
+      setNotice({
+        kind: "info",
+        text: "Mana Leak is still answering. Your message is still in the box — send it when this answer finishes, or press Stop first.",
+      });
+      return;
+    }
+    if (!content) {
+      setNotice({ kind: "info", text: "Type a question before sending." });
+      return;
+    }
 
     const localUserId = `local-${crypto.randomUUID()}`;
-    setMessages((prev) => [...prev, { id: localUserId, role: "user", content }]);
+    setMessages((prev) => [...prev, { id: localUserId, role: "user", content, pending: true }]);
     setInput("");
-    setTurnError(null);
+    setNotice(null);
+    streamingRef.current = true;
+    turnStartedRef.current = true;
     setStreaming(true);
+    streamingMessageIdRef.current = null;
     setStreamingMessageId(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let stopped = false;
 
     try {
       const res = await fetch(`/api/conversations/${conversationId}/messages`, {
@@ -113,15 +204,14 @@ export function ChatView({ conversationId }: { conversationId: string }) {
       });
 
       if (!res.ok || !res.body) {
-        const body = (await res.json()) as ErrorResponse;
-        if (body.error.code === "validation_error") {
-          // Deterministic validation rejects before anything is persisted
-          // (contracts.md → REST API → Conversation behaviour) — drop the
-          // optimistic bubble so it doesn't survive a reload it never will.
-          setMessages((prev) => prev.filter((m) => m.id !== localUserId));
-        }
-        setTurnError(body.error.message);
-        setStreaming(false);
+        // A request rejected before the stream starts persists nothing
+        // (contracts.md → REST API → Conversation behaviour: validation, then
+        // the user message, then the turn), so the optimistic bubble goes and
+        // the text is handed back for a retry instead of vanishing.
+        const message = await readErrorMessage(res);
+        setMessages((prev) => prev.filter((m) => m.id !== localUserId));
+        setInput((current) => (current === "" ? content : current));
+        setNotice({ kind: "error", text: message });
         return;
       }
 
@@ -130,48 +220,56 @@ export function ChatView({ conversationId }: { conversationId: string }) {
         switch (event.type) {
           case "message_start": {
             const messageId = event.message_id as string;
+            streamingMessageIdRef.current = messageId;
             setStreamingMessageId(messageId);
             appendOrUpdateMessage(messageId, "assistant", () => "");
             break;
           }
           case "text_delta": {
-            const delta = event.delta as string;
-            setStreamingMessageId((current) => {
-              if (current) appendOrUpdateMessage(current, "assistant", (prev) => prev + delta);
-              return current;
-            });
+            const id = streamingMessageIdRef.current;
+            if (id) appendOrUpdateMessage(id, "assistant", (prev) => prev + (event.delta as string));
             break;
           }
           case "final": {
+            const id = streamingMessageIdRef.current;
             const text = event.text as string;
             const error = event.error as ErrorResponse["error"] | null;
-            setStreamingMessageId((current) => {
-              if (current) appendOrUpdateMessage(current, "assistant", () => text);
-              return current;
-            });
-            if (error) setTurnError(error.message);
+            if (id) appendOrUpdateMessage(id, "assistant", () => text);
+            if (error) setNotice({ kind: "error", text: error.message });
             break;
           }
           case "error": {
             const error = event.error as ErrorResponse["error"];
-            setTurnError(error.message);
+            setNotice({ kind: "error", text: error.message });
             break;
           }
-          case "message_end":
-            void refreshConversationMeta();
-            break;
           default:
+            // `message_end` closes the stream; the turn settles below.
             break;
         }
       }
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
-        setTurnError(err instanceof Error ? err.message : "The connection was lost.");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        stopped = true;
+      } else {
+        setNotice({
+          kind: "error",
+          text: err instanceof Error ? err.message : "The connection was lost.",
+        });
       }
     } finally {
+      streamingRef.current = false;
+      abortRef.current = null;
+      streamingMessageIdRef.current = null;
       setStreaming(false);
       setStreamingMessageId(null);
-      abortRef.current = null;
+      if (stopped && mountedRef.current) {
+        setNotice({
+          kind: "info",
+          text: "Answer stopped. What is shown above is what the server recorded.",
+        });
+      }
+      if (mountedRef.current) void refreshTitle();
     }
   }
 
@@ -179,10 +277,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     abortRef.current?.abort();
   }
 
-  if (loadState === "loading") {
-    return <main style={{ padding: "4rem" }}>Loading…</main>;
-  }
-  if (loadState === "not_found") {
+  if (historyState === "not_found") {
     return (
       <main style={{ padding: "4rem", fontFamily: "system-ui, sans-serif" }}>
         <p>Conversation not found.</p>
@@ -190,7 +285,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
       </main>
     );
   }
-  if (loadState === "error") {
+  if (historyState === "error") {
     return (
       <main style={{ padding: "4rem", fontFamily: "system-ui, sans-serif" }}>
         <p>Could not load this conversation.</p>
@@ -205,6 +300,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
         <Link href="/">← New chat</Link>
       </p>
       <h1>{title ?? "Untitled conversation"}</h1>
+      {historyState === "loading" && <p>Loading earlier messages…</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", margin: "1.5rem 0" }}>
         {messages.map((message) => (
           <div key={message.id}>
@@ -217,7 +313,11 @@ export function ChatView({ conversationId }: { conversationId: string }) {
         ))}
         {streaming && streamingMessageId === null && <p>Mana Leak is thinking…</p>}
       </div>
-      {turnError && <p style={{ color: "crimson" }}>{turnError}</p>}
+      {notice && (
+        <p role="status" style={{ color: notice.kind === "error" ? "crimson" : "#555" }}>
+          {notice.text}
+        </p>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -225,20 +325,22 @@ export function ChatView({ conversationId }: { conversationId: string }) {
         }}
         style={{ display: "flex", gap: "0.5rem" }}
       >
+        {/* The composer never changes shape while a turn runs: the input stays
+            editable and Send keeps its place, so the next question can be
+            typed during an answer and a click where Send was can never land on
+            Stop and kill the turn. Stop is a separate control that exists only
+            while there is something to stop. */}
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Ask about a card, a combo, or a ruling…"
-          disabled={streaming}
+          aria-label="Message"
           style={{ flex: 1, padding: "0.5rem" }}
         />
-        {streaming ? (
+        <button type="submit">Send</button>
+        {streaming && (
           <button type="button" onClick={stopStreaming}>
             Stop
-          </button>
-        ) : (
-          <button type="submit" disabled={!input.trim()}>
-            Send
           </button>
         )}
       </form>

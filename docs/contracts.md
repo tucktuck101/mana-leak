@@ -932,7 +932,7 @@ Loaded by one `pydantic-settings` `Settings` class in the core (env vars, then `
 
 ## Operational limits
 
-Defined once as defaults in `Settings` (`LIMIT_*` env overrides allowed for evals, not documented to users):
+Defined once as defaults in `Settings`. Each can be overridden by an env var with the field's upper-case name (e.g. `MODEL_CALLS_MAX`), for evals only; these overrides aren't documented to users.
 
 | Limit | Value | Kind |
 |---|---:|---|

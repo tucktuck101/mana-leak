@@ -1,0 +1,23 @@
+# workmux project configuration for Mana Leak.
+# Personal/agent settings live in ~/.config/workmux/config.yaml (global only).
+# Lanes follow AGENTS.md; reviews follow AGENTS.md §49a (not the workmux lane-review gate).
+
+main_branch: master
+base_branch: auto
+
+files:
+  # Share the single local .env (gitignored, chmod 600) instead of copying secrets
+  # into every worktree. It holds the app's OpenRouter key, used only by the app itself.
+  symlink:
+    - .env
+
+# Fresh worktrees get their own Python venv and web deps (workspace installs are
+# path-bound, so .venv is not shared).
+post_create:
+  - uv sync
+  - npm --prefix apps/web install --no-audit --no-fund
+
+# Never merge a lane that breaks the scaffold checks.
+pre_merge:
+  - make test
+  - make lint

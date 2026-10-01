@@ -1,9 +1,9 @@
-Current activity: M2 implementation. WP1 (eaaefcc) and WP3 (3fdfe8b) merged. In flight: m2-compose (WP2, relaunched after freezing on docker run), m2-gateway-trace (WP4), m2-api-health (WP6), m2-orchestrator-trace (WP5); wave 2 dispatched early since it depends only on WP3 and is file-disjoint from WP2.
+Current activity: M2 implementation. WP1–WP6 merged (latest 5285eb5); master make test 173 passed. WP7 m2-e2e (full-stack e2e with Langfuse) dispatched.
 
 Done: M1 Complete. M2 PRD + plan Fable-reviewed (single pass each), all findings applied; secrets fail closed (user decision); per-worktree test schemas (user decision).
 
-In flight: 4 lanes (see above).
+In flight: lane m2-e2e. It starts the Langfuse services.
 
-Waiting on user: nothing.
+Waiting on user: optional rotation of OPENROUTER_API_KEY (leaked twice into transcripts) and MANA_LEAK_DB_PASSWORD (leaked once).
 
-Next action: merge WP2 when ready; merge wave 2 in order WP4 → WP6 → WP5 (re-test WP5 against both); then WP7 e2e, Langfuse UI + browser check, §49a milestone gate, doc-sync step, mark M2 Complete.
+Next action: when m2-e2e settles, checks, merge, run make e2e on master, browser + Langfuse UI check (AC-9), §49a milestone gate, doc-sync step, mark M2 Complete.

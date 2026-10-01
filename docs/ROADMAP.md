@@ -651,6 +651,8 @@ M1 spike results (2026-10-01, LiteLLM 1.103.1 → OpenRouter → `deepseek-v4-fl
 
 M1 PRD decisions (user, 2026-10-01): M1 runs deterministic input validation only, and model screening arrives in M8. Summarisation is deferred to M8, so M1–M7 send the last 10 turns.
 
+Test isolation (user, 2026-10-01): DB-backed tests in each worktree use a per-worktree database (`mana_leak_test_<worktree>`), created on first use and dropped at session end. Parallel lanes sharing one `mana_leak_test` database corrupted each other's runs during M1. This is built as M2's first work package.
+
 M1 implementation deviations (recorded from the M1 plan):
 
 - `append_message` takes an optional keyword-only `message_id`, because `message_start` must announce the assistant message id before the row exists. `ModelContext` fields are defined (`conversation_id`, `summary`, `messages`; Judge facts arrive in M7). Both are in `contracts.md`.

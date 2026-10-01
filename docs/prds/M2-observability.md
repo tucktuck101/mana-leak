@@ -151,8 +151,10 @@ None for this milestone — the eval harness and its gates are introduced at M5/
 
 ## 13. Open issues / design gaps
 
-- **Per-worktree/isolated test database for parallel test lanes:** no support for this as a project convention was found in `AGENTS.md` or `docs/ROADMAP.md` — neither document mentions worktrees, parallel test lanes, or per-lane database isolation. Raised here as a product/process question for the user rather than decided silently (`docs/prds/README.md` → Deriving a PRD, step 4: "Product or architecture questions go to the user").
-- Langfuse stack topology, `LANGFUSE_INIT_*` set, and SDK v4 API: verified 2026-10-01 (see Risks); no longer open.
+None. Resolved 2026-10-01:
+
+- Test isolation (user decision): each worktree's DB-backed tests use their own database (`mana_leak_test_<worktree>`), created on first use and dropped at session end, so parallel lanes can't interfere. This is development tooling, not product behaviour; the M2 plan builds it as its first work package.
+- Langfuse stack topology, `LANGFUSE_INIT_*` set, and SDK v4 API: verified (see Risks).
 
 ## 14. Completion condition
 

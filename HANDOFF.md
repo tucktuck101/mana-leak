@@ -6,7 +6,7 @@ Done:
 
 In flight: nothing. Compose stack (postgres/api/web) is running.
 
-Waiting on user: M2 PRD review; decision on per-worktree test DB isolation (PRD open issue).
+Waiting on user: review of docs/prds/M2-observability.md (Proposed). Test-DB isolation decided (per-worktree DB, first M2 WP).
 
 Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
 

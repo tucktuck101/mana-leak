@@ -1,7 +1,7 @@
 # Secrets
 .env
 .env.*
-__omp_shell(".env.example")
+!.env.example
 
 # Python
 .venv/
@@ -32,11 +32,11 @@ npm-debug.log*
 
 # Eval outputs (fixtures in evals/fixtures/ stay tracked)
 evals/results/*
-__omp_shell("evals/results/.gitkeep")
+!evals/results/.gitkeep
 
 # Locally downloaded bulk datasets and runtime files
 data/*
-__omp_shell("data/.gitkeep")
+!data/.gitkeep
 *.db
 *.sqlite
 *.sqlite3

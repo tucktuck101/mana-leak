@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["mana-leak-core", "mana-leak-api"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "anyio>=4.5", "ruff>=0.6"]
 
 [tool.uv]
 package = false
@@ -20,6 +20,9 @@ mana-leak-api = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: exercises a live model/API call; deselected by default (`-m 'not live'`); `make test` runs it when OPENROUTER_API_KEY is already in the environment (WP7)",
+]
 
 [tool.ruff]
 line-length = 100

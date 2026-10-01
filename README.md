@@ -4,7 +4,7 @@ Mana Leak is a local-first, EDH-focused AI assistant for card search, Commander 
 
 Built as a **24-hour solo buildathon** project. The target is **local execution only** via Docker Compose; no public deployment.
 
-**Status:** repository scaffold. No application features are implemented yet.
+**Status:** M1 walking skeleton implemented — persisted, resumable, streamed chat conversation end to end (Postgres, FastAPI SSE, turn orchestrator, model gateway, Next.js UI). No card, combo, rules, or judge capability yet.
 
 ## Prerequisites
 
@@ -15,16 +15,25 @@ Built as a **24-hour solo buildathon** project. The target is **local execution 
 
 ## Quick start
 
-> Placeholder — finalised once the application is implemented.
-
 ```bash
-cp .env.example .env   # fill in values
-make setup             # local Python + web dependencies
-make test
-make docker-up         # postgres + api + web
+cp .env.example .env   # fill in values (OPENROUTER_API_KEY, CHAT_MODEL, DB passwords)
+make setup              # local Python + web dependencies
+make test                # unit/integration tests (live tests only if OPENROUTER_API_KEY is set)
+make docker-up           # postgres + api + web, built and started via Compose
 ```
 
-Other commands: `make dev`, `make lint`, `make format`, `make docker-down`.
+Open `http://localhost:3000` in a browser: create a conversation, send a message, and watch the
+assistant's answer stream in. Reload the page to confirm the conversation persists; continue it
+with another message.
+
+`make e2e` runs the full Compose stack end to end (`tests/e2e/run.sh`): brings up
+`postgres`/`api`/`web`, waits for all three to report healthy, streams a chat turn through the
+Next.js proxy, restarts `postgres` and `api` to prove persistence survives a container restart,
+and aborts a stream mid-turn to prove partial text is persisted with its error payload. It leaves
+the stack running afterward; use `make docker-down` to stop it.
+
+Other commands: `make dev` (run API + web locally without Docker), `make lint`, `make format`,
+`make docker-down`.
 
 ## Documentation
 

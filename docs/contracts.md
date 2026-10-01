@@ -13,7 +13,7 @@ All Python contracts are Pydantic v2 models in `packages/core` (module `mana_lea
 - **One shared core.** Every capability has one core function. FastAPI, CLI, MCP, and LLM tools call that function and only translate inputs and outputs.
 - **Pydantic at boundaries.** Model outputs, tool arguments and results, API bodies, Judge state, and route/screening decisions are typed models. Unstructured `dict`s appear only inside documented `details`/`metadata` fields.
 - **Evidence carries provenance.** Domain records from external sources carry `Provenance`. Rulings carry citations that code has resolved against retrieved evidence.
-- **Models propose, code decides.** A model's output is a *draft* type (`RouteDecision`, `RulingDraft`, tool-call arguments). Code validates it and builds the final type, filling IDs, versions, and provenance itself. Models never supply IDs, versions, or provenance values.
+- **Models propose, code decides.** A model's output is a *draft* type (`RouteDecision`, `JudgeDraft`, tool-call arguments). Code validates it and builds the final type, filling IDs, versions, and provenance itself. Models never supply IDs, versions, or provenance values.
 - **Failures are values.** Expected failures are returned as typed results (`ToolResult` with `ToolError`, `CardLookupResult`, `ErrorEvent`). Raw exceptions and stack traces never reach a user.
 
 ## Conventions
@@ -42,7 +42,7 @@ class RetrievalMethod(StrEnum):  semantic, keyword, rule_number, hybrid
 class CommanderLegality(StrEnum): legal, not_legal, banned, restricted
 class Severity(StrEnum):         info, warning, error
 class ComboSource(StrEnum):      live, cache, fixture
-class ContinuationKind(StrEnum): answer, new_question, abandon
+class ContinuationKind(StrEnum): answer, new_question, leave_session
 class EvalSuite(StrEnum):        mtg_qa, current_rules, retrieval, routing_tool, adversarial, judge_mode
 class EvalSplit(StrEnum):        smoke, dev, held_out, gold
 ```
@@ -170,6 +170,7 @@ class ComboSummary(BaseModel):
 class Combo(BaseModel):
     id: str
     cards: list[ComboCard]
+    templates: list[str] = []             # Spellbook "requires" generic template cards, e.g. "a sac outlet"
     color_identity: list[str]
     prerequisites: list[str]
     steps: list[str]                      # ordered
@@ -202,8 +203,12 @@ class ComboGetRequest(BaseModel):
 - **`search_combos`** is exploratory: free text and/or filters, returning a `ComboSearchResult` of `ComboSummary` items. At least one of `query` or `card_names` is required.
 - **`find_combos`** answers the primary use case "which known combos include these cards?" It returns a `ComboFindResult` of full `Combo` records containing **all** supplied cards. Before querying, card names are resolved through `get_card`; unresolved or ambiguous names make the whole call fail with `not_found`/`ambiguous_match` and list the names involved, so it never runs a partial search silently.
 - **`get_combo`** returns one `Combo` by ID.
+- **`templates`** lists Spellbook's generic template requirements (e.g. "a sac outlet") that the combo needs beyond the named `cards` — descriptive text, never resolved to card records, and never treated as an identified/involved card for Judge citation purposes.
 - A `Combo` object is only ever built by the Spellbook adapter or the fixture loader. Model text describing a combo is never parsed into `Combo`.
 - **`source`** replaces the old per-`Combo` `from_cache` flag: it describes where the whole result came from (`live`, `cache`, or `fixture`), so even an empty result carries provenance. If live fails **and** neither the cache nor the fixtures has an entry covering every requested card, the call raises `dependency_unavailable` ("combo data unavailable") — it never falls back to an empty `ComboSearchResult`/`ComboFindResult` as a stand-in for a dependency failure. A genuinely empty **live** result (Spellbook simply has no matching variant) is a value, not an error: the judge and the answer prompt must phrase it as "no known combo in Commander Spellbook for these cards", never "these cards don't combo" — Spellbook coverage is not completeness.
+- **Offline (`COMBO_SOURCE=fixtures`):** the live tier is skipped entirely, so nothing "fails" there. An empty fixtures result is a value with `source=fixture`, phrased as "no known combo in the offline combo set" (not the live-empty phrasing above — fixtures mode never actually asks Commander Spellbook).
+- **`search_combos` with `query` only (no `card_names`) and live down:** the cache has no full-text search, so only the fixtures are checked for a match; a fixtures match returns `source=fixture`, otherwise `dependency_unavailable`.
+- **`get_combo` offline** (live down, or `COMBO_SOURCE=fixtures`): checks the cache, then the fixtures, by `id`; if neither has it, `not_found` (`source` names whichever tier was checked last) — a single known ID is either on record locally or it is not, never `dependency_unavailable`.
 
 ## Rules contracts
 
@@ -230,6 +235,8 @@ class RuleHit(BaseModel):
 - At least one of `query` or `rule_number` is required.
 - `rule_number` lookup returns the chunk(s) containing that rule or subrule (`method=rule_number`). Rule-number hits come first.
 - With `query`: run semantic (top 8) and keyword (top 8) searches, merge by reciprocal rank (k = 60), deduplicate by `chunk_id`, and return up to `limit` hits with `method=hybrid`. If embeddings are unavailable, keyword results alone are returned with `method=keyword`, and a `dependency_degraded` audit event is emitted.
+- **Keyword leg (OR-semantics):** `websearch_to_tsquery('english', query)`; if that produces an empty tsquery (common once `query` carries many distinct words), fall back to `to_tsquery` over the query's deduplicated lexemes joined with `|` (OR), so the leg still ranks partial matches instead of returning nothing. The semantic leg always embeds the full `query` text.
+- **Judge-internal callers are exempt from the 1000-char cap.** `RuleSearchRequest.query` stays ≤1000 for every public caller — REST `/rules/search`, CLI `rules search`, MCP `search_rules`, and the `search_rules` LLM tool. Only the judge's own retrieval (Judge contracts → Judge flow, step 1) builds longer, uncapped text and calls the same semantic/keyword/merge implementation directly instead of constructing a `RuleSearchRequest`.
 
 ## Citation contracts
 
@@ -288,18 +295,20 @@ class SufficiencyDecision(BaseModel):    # bounded decision (Jev or local substi
     missing_facts: list[str] = Field(default=[], max_length=3)   # each ≤200 chars; empty iff sufficient
     reason: str | None = Field(default=None, max_length=200)
 
-class ContinuationDecision(BaseModel):   # bounded decision; one model call, only when a session is active
+class ContinuationDecision(BaseModel):   # bounded decision; one model call, only when a session is active and no explicit control was given
     model_config = ConfigDict(extra="forbid")
     kind: ContinuationKind
+    confident: bool = True                # false → ask the user to disambiguate instead of acting on `kind`
 
-class RulingDraft(BaseModel):            # model-produced; never shown without validation
+class JudgeDraft(BaseModel):             # model-produced; never shown without validation
     model_config = ConfigDict(extra="forbid")
-    status: RulingStatus
+    answer_kind: Literal["explanation", "ruling"]
+    status: RulingStatus | None = None    # required iff answer_kind == "ruling"; null for "explanation"
     summary: str = Field(max_length=400)
     explanation: str = Field(max_length=6000)
     assumptions: list[str] = Field(default=[], max_length=5)
     missing_information: list[str] = Field(default=[], max_length=5)
-    citations: list[CitationRef] = Field(max_length=12)
+    citations: list[CitationRef]          # `type="card"` entries uncapped; at most 12 with `type` in {rule, combo}
 
 class CardRef(BaseModel):
     oracle_id: UUID
@@ -317,7 +326,7 @@ class Ruling(BaseModel):
     explanation: str
     assumptions: list[str]
     missing_information: list[str]
-    cards: list[CardRef]                  # persisted as ruling.card_oracle_ids
+    cards: list[CardRef]                  # involved cards, persisted as ruling.card_oracle_ids
     rule_numbers: list[str]               # derived from rule citations
     citations: list[Citation]
     rules_version: str | None = None
@@ -337,44 +346,104 @@ class NeedMoreInformation(BaseModel):
     missing_facts: list[str]              # 1–3
     clarification_questions: list[str]    # 1–3, one per missing fact
     clarification_count: int              # rounds already asked, including this one
-    max_clarifications: int = 3
+    max_clarifications: int = 3           # Settings.JUDGE_MAX_CLARIFICATIONS
 
-JudgeResult = Annotated[Ruling | NeedMoreInformation, Field(discriminator="kind")]
+class RulesExplanation(BaseModel):
+    kind: Literal["rules_explanation"] = "rules_explanation"
+    id: UUID
+    conversation_id: UUID
+    judge_session_id: UUID | None = None
+    turn_id: UUID
+    question: str
+    summary: str
+    explanation: str
+    cards: list[CardRef]                  # involved cards, persisted as ruling.card_oracle_ids
+    rule_numbers: list[str]               # derived from rule citations
+    citations: list[Citation]
+    assumptions: list[str]
+    missing_information: list[str]
+    rules_version: str | None = None
+    card_source_version: str | None = None
+    model: str
+    prompt_version: str
+    trace_id: str | None = None
+    created_at: datetime
+
+class RuleText(BaseModel):
+    kind: Literal["rule_text"] = "rule_text"
+    rule_number: str
+    text: str                             # quoted verbatim, no model paraphrase
+    rules_version: str
+    provenance: Provenance
+
+JudgeResult = Annotated[Ruling | NeedMoreInformation | RulesExplanation | RuleText, Field(discriminator="kind")]
 ```
+
+**Answer kinds.** The judge produces one of three result shapes:
+
+- `RuleText` — the user asks for a rule's exact text (e.g. "what is rule 702.19?"). Judge flow step 0: deterministic lookup, quoted verbatim, no model paraphrase. A short model summary may follow only if the user explicitly asks for one, as ordinary streamed text alongside the result — it never changes the `RuleText` result itself.
+- `RulesExplanation` — the default for rules/interaction questions that are not asking for a legality verdict: a cited natural-language explanation able to walk through a multi-step board state (e.g. a card cast mid-search while its cost is paid by another permanent's mana ability — the Comprehensive Rules are sufficient for these). Same citation validation, second pass, force-ask, and sufficiency as `Ruling` (below).
+- `Ruling` (`legal`/`illegal`/`conditional`/`insufficient_information`) — the user asks whether something is legal, works, or is allowed.
+
+`answer_kind` is a bounded field the judge fills in on `JudgeDraft` itself (Judge flow step 5) — the judge chooses, code never guesses from keyword matching. `RuleText` is the one exception: its shape is chosen deterministically from the message, before any model call (Judge flow step 0).
+
+**Sources.** The judge answers only from the Comprehensive Rules (ingested rule chunks); it never cites or relies on the Magic Tournament Rules or Infraction Procedure Guide. If a question genuinely turns on tournament policy rather than game rules, it says so in `explanation` and does not produce a `legal`/`illegal`/`conditional` verdict on the policy question.
 
 **Validation rules (code):**
 
-- `status=insufficient_information` requires a non-empty `missing_information`; other statuses require at least one rule citation.
-- `legal`, `illegal`, and `conditional` require every involved card to be cited.
-- Draft validation failure (schema or citation) → one retry with the validation error appended. A second failure → a `Ruling` with `status=insufficient_information`, a fixed safe `summary`, empty citations, and `missing_information=["A supported ruling could not be produced from the available evidence."]`, plus a `citation_validation_failed` or `structured_output_invalid` audit event.
-- **Force-ask rule:** a validated draft with `status=conditional` is shown as-is only if `assumptions` is empty (a genuinely branching outcome, explained in `explanation`) or `clarification_count == 3` (rounds exhausted, so the condition is reported instead of asked). Otherwise — `assumptions` non-empty with rounds remaining — code converts the result to `NeedMoreInformation` instead: each assumption becomes a missing fact and a clarification question (one per assumption, truncated to 3). This is the deterministic guard against the model answering instead of asking.
+- `answer_kind="ruling"` with `status=insufficient_information` requires a non-empty `missing_information`; every other combination — any other `status`, and every `answer_kind="explanation"` draft — requires `missing_information` empty and at least one rule citation.
+- Every involved card (Judge flow step 1: identified cards the draft mentions by name or `oracle_id`) must be cited, for `answer_kind="ruling"` with `status` in `legal`/`illegal`/`conditional`, and for `answer_kind="explanation"`.
+- `citations` may include any number of `type="card"` entries but at most 12 entries with `type` in `{"rule", "combo"}`; a draft exceeding that fails validation like any other citation failure.
+- Draft validation failure (schema or citation) → one retry with the validation error appended. A second failure → a `Ruling` with `status=insufficient_information`, a fixed safe `summary`, empty citations, and `missing_information=["A supported ruling could not be produced from the available evidence."]`, plus a `citation_validation_failed` or `structured_output_invalid` audit event — even when the draft's `answer_kind` was `"explanation"`; code never fabricates a best-effort `RulesExplanation`.
+- **Force-ask rule:** applies to a validated draft of any `answer_kind`/`status` combination other than `status=insufficient_information`. The draft is shown as-is only if `assumptions` is empty, or `clarification_count == max_clarifications` (rounds exhausted, so the draft — whatever its `status` — is reported instead of asked, assumptions included). Otherwise — `assumptions` non-empty with rounds remaining — code converts the result to `NeedMoreInformation` instead, performing the same bookkeeping as Judge flow step 3: upsert the active `judge_session`, set `card_oracle_ids` from the draft's identified cards, set `missing_facts`/`clarification_questions` (one per assumption, truncated to 3), and increment `clarification_count`. This is the deterministic guard against the model answering with unstated assumptions instead of asking — for every status, including `legal`/`illegal`, not only `conditional`.
 
 **Judge flow (code-owned):**
 
+0. **Rule-text lookup (deterministic, no model call):** if the message is a bare request for a rule's text — it contains exactly one `rule_number`-shaped match (`\d{3}(\.\d+[a-z]?)?` or `glossary:<term>`), and once that match and fixed lookup phrasing ("what is", "what does … say", "text of", "show me", "define", "rule", punctuation) are stripped no other substantive words remain (no identified cards, no legality wording like "legal"/"can I"/"does this work") — look up the rule/subrule by `rule_number` (Rules contracts) and return `RuleText`. Otherwise continue from step 1.
 1. **Evidence gathering (deterministic, no model call):**
-   - *Cards:* extract candidate names/face names from the current message and resolve each via `get_card`; add `oracle_id`s already present in `CardsResult`/`CombosResult`/`Ruling` payloads of recent assistant messages in context, plus the active Judge session's `card_oracle_ids`. A `not_found` or `ambiguous` lookup makes that piece a missing fact (e.g. "Which card do you mean by 'Kiki'?") instead of failing the turn.
-   - *Rules query:* the user question plus the identified cards' names and Oracle text. Explicit rule/subrule numbers in the question (matching the `rule_number` shape, `\d{3}(\.\d+[a-z]?)?`) are looked up directly by `rule_number` first; the remaining text runs the normal hybrid search. Together these fill the ledger with ≤8 rule chunks.
+   - *Identified cards:* resolved via `get_card`, in precedence order: (a) candidate names/face names extracted from the **current message** (Card-name extraction, below); (b) `oracle_id`s present in the **last assistant result only** (`CardsResult`/`CombosResult`/`Ruling`/`RulesExplanation` payload of the most recent assistant message — not all 10 turns of context); (c) the active Judge session's `card_oracle_ids`. Capped at 10 total, filled in that precedence order. A `not_found` or `ambiguous` candidate from (a) makes that piece a missing fact (e.g. "Which card do you mean by 'Kiki'?") instead of failing the turn.
+   - *Card-name extraction* (current message only): an explicit `[[Card Name]]` span always resolves via `get_card`. Otherwise, a deterministic longest-match scan over normalised 1–6-token n-grams against `name_normalized`/`face_names_normalized` for an exact match; a single-token match is accepted only if that token is capitalised in the message or the match is ≥2 tokens long (so incidental lowercase common words like "cancel"/"fear" are skipped, while capitalised one-word names and any multi-word name still match).
+   - *Involved cards* (must be cited, Validation rules above): the identified cards the draft actually mentions, by name or `oracle_id`, in `explanation` or `citations`. Identified cards the draft never mentions are evidence only.
+   - *Rules query:* explicit rule/subrule numbers in the question (matching the `rule_number` shape) are looked up directly by `rule_number` first. The remaining text runs hybrid search through the judge's own uncapped internal path (Rules contracts → Judge-internal callers), not the public `RuleSearchRequest`: the **semantic** leg embeds the question plus the identified cards' names plus the first 300 characters of each identified card's Oracle text (no length cap); the **keyword** leg runs OR-semantics full-text search (Rules contracts) over the question text *only*, so a multi-card question still matches. Together these fill the ledger with ≤8 rule chunks.
    - `find_combos` runs only when the question names two or more identified cards, or the conversation's last assistant result was a combo; its items join the ledger. A `dependency_unavailable` from this internal call does not fail the turn — the judge proceeds without combo evidence.
 2. Call `SufficiencyDecision` with the question, known facts, and evidence summaries.
-3. If `sufficient=false` and `clarification_count < 3`: upsert the active `judge_session`, increment `clarification_count`, and return `NeedMoreInformation`.
-4. If `sufficient=false` and `clarification_count == 3`: set the session to `exhausted` and return a `Ruling` (`insufficient_information`) that lists the missing facts.
-5. If sufficient: generate a `RulingDraft`.
-6. **Bounded second pass:** collect rule numbers the draft references (its `citations`, or matching that same shape anywhere in `explanation`) that are absent from the ledger; fetch each by `rule_number` lookup, inserting the result and evicting the lowest-scored `hybrid`-method hit so the ledger's rule-chunk count stays ≤8. If anything was fetched, regenerate the draft **once** more against the enriched ledger. No further retrieval or extra model calls happen after this, regardless of outcome.
+3. If `sufficient=false` and `clarification_count < max_clarifications` (`Settings.JUDGE_MAX_CLARIFICATIONS`, default 3): upsert the active `judge_session`, increment `clarification_count`, and return `NeedMoreInformation`.
+4. If `sufficient=false` and `clarification_count == max_clarifications`: set the session to `exhausted` and return a `Ruling` (`insufficient_information`) that lists the missing facts.
+5. If sufficient: generate a `JudgeDraft` — the judge chooses `answer_kind` (Answer kinds above).
+6. **Bounded second pass:** collect rule numbers the draft references (its `citations`, or matching the dotted subrule pattern `\d{3}\.\d+[a-z]?` — not the bare 3-digit `rule_number` shape, which false-positives on prose like "500 damage" — anywhere in `explanation`) that are absent from the ledger; fetch each by `rule_number` lookup, inserting the result and evicting the lowest-scored `hybrid`-method hit that the first draft's `citations` did **not** cite (if every `hybrid` hit was cited, or there are none to evict, the ledger is allowed to exceed 8 by the fetched count instead) so the ledger's rule-chunk count otherwise stays ≤8. If anything was fetched, regenerate the draft **once** more against the enriched ledger. No further retrieval or extra model calls happen after this, regardless of outcome.
 7. Validate the draft (Validation rules above: schema and citation checks, with their own one retry on failure).
-8. Apply the force-ask rule (Validation rules above) to a validated `conditional` draft.
-9. Persist the `Ruling` (with `judge_session_id` if a session exists), and set the session to `completed`.
+8. Apply the force-ask rule (Validation rules above) to the validated draft, for any `answer_kind`/`status`.
+9. Persist the result in the `ruling` table (`kind="ruling"` for a `Ruling` with its `status` set, `kind="explanation"` for a `RulesExplanation` with `status` null), with `judge_session_id` if a session exists, and set the session to `completed`. A `RuleText` (step 0) is never persisted as a `ruling` row — it is message payload only.
 
-A `NeedMoreInformation` is not persisted as a `ruling` row; it is persisted as `judge_session` state plus the assistant message.
+A `NeedMoreInformation` is not persisted as a `ruling` row either; it is persisted as `judge_session` state plus the assistant message.
 
-A typical judge turn makes 4 model calls (screening, routing-or-continuation, sufficiency, draft); the bounded second pass and the validation retry can each add one more, for an observed worst case of 6 — comfortably inside the per-turn cap (Operational limits).
+A typical judge turn makes 4 model calls (screening, routing-or-continuation, sufficiency, draft) — comfortably inside the per-turn cap. Each of those 4 can independently consume its own structured-output retry (Operational limits), the bounded second pass can add one more draft regeneration, and the draft-validation retry can add one more again: true worst case is 9 model calls before summarisation, 10 if context summarisation (Turn orchestration step 4) also runs — summarisation is skipped whenever fewer than 2 calls remain in the budget (Operational limits → What counts), so it never pushes a turn over the cap by itself. A turn that genuinely stacks every retry still reaches the hard cap of 8 before completing: the model gateway raises `model_limit_exceeded` (Operational limits → What counts), which — like any mid-turn failure — surfaces as an `error` event over SSE (Streaming events → SSE mapping) rather than a fabricated result.
 
-**Session continuation:** with an active Judge session, the router is skipped entirely (Turn orchestration step 5). Code first checks the new user message, case-insensitively, against a fixed list of deterministic cancel phrases (`"cancel"`, `"never mind"`, `"stop"`, …); a match abandons the session with **no model call**. Otherwise, one bounded model call (`ROUTER_MODEL`, prompt `continuation-v1`) returns a `ContinuationDecision`:
+**Session controls:** with an active Judge session, the router never runs; session controls decide the turn instead (Turn orchestration step 5), regardless of whether the caller also set `forced_route`. Each interface gives the user an explicit, deterministic control alongside plain text, with no model call:
+
+| Interface | Explicit control | Effect |
+|---|---|---|
+| Web UI | "Judge session" indicator's "End session" button | `session_action=leave_session` |
+| Web UI | "New chat" button | starts a new conversation (not a session transition) |
+| Web UI | Stop-generation button while streaming | aborts the browser's connection (Streaming events → Client disconnect); independent of session state |
+| CLI `chat` | `/cancel` | `session_action=leave_session` |
+| CLI `chat` | `/new <question>` | `session_action=new_question`, `<question>` as content |
+| CLI `chat` | `/help` | prints command help; not sent as a turn |
+| CLI `judge` | `--action answer\|new_question\|end_session` | forces that outcome, mirroring MCP |
+| MCP `judge` | `action: "answer" \| "new_question" \| "end_session"` (optional) | forces that outcome; omitted → inferred below |
+| REST `POST …/messages` | body `action: "end_session" \| "new_question"` (optional) | forces that outcome; omitted → inferred below |
+
+These map to `process_turn`'s `session_action` parameter (`ContinuationKind | None`, Core service interfaces); `end_session`/`--action end_session` map to `leave_session`. A leading `/` in CLI `chat` is never resolved as a card name or sent as content; an unrecognised `/command` is a local usage error, not a turn.
+
+Without an explicit control, one bounded model call (`ROUTER_MODEL`, prompt `continuation-v1`) returns a `ContinuationDecision`, which code acts on:
 
 - `answer` — the message is added to `known_facts`; the judge re-runs from step 1 of the Judge flow with the original `question`.
-- `new_question` — the active session is set to `abandoned`; a new Judge flow starts from step 1 with the new message as `question`.
-- `abandon` — the active session is set to `abandoned`; the turn routes normally, as if no session were active.
+- `new_question` — a new *rules/legality* question for the judge: the active session is set to `abandoned` (`JudgeSessionStatus`); a new Judge flow starts from step 1 with the new message as `question`.
+- `leave_session` — anything else, including card/combo/general requests that are not new rules questions: the active session is set to `abandoned`. If a message was given, the turn then routes it normally, as if no session were active — **unless** the caller set `forced_route` (CLI/MCP `judge`), in which case the message becomes a new judge question instead (Turn orchestration step 5), so the result stays within `JudgeResult`. If no message was given (an explicit `leave_session`/`end_session` control with no content), the turn ends here with no further routing.
 
-Every transition — a cancel phrase, `new_question`, `abandon`, normal completion, or exhaustion — emits a `judge_transition` audit event.
+If the decision is not confident (`confident=False` — e.g. a bare word that is both a card name and an intent, like "Cancel"), code does not act on `kind` at all: it asks the user directly which they meant, without starting a Judge round, consuming a clarification round, or changing session state, and waits for an explicit control or an unambiguous reply. Plain text is never pattern-matched against a fixed phrase list — "Cancel" remains a valid card name; only an explicit control or a confident `ContinuationDecision` changes session state.
+
+Every transition — an explicit control, `new_question`, `leave_session`, normal completion, or exhaustion — emits a `judge_transition` audit event.
 
 ## Router contract
 
@@ -387,7 +456,7 @@ class RouteDecision(BaseModel):
 
 - One model call (`ROUTER_MODEL`, prompt `router-v1`), using structured output.
 - If the output is invalid after 1 retry, the route defaults to `other` (`structured_output_invalid` audit event).
-- Skipped when `forced_route` is set (CLI/MCP `judge`) or a Judge session is active — Session continuation's `ContinuationDecision` decides instead (Turn orchestration step 5).
+- Skipped whenever a Judge session is active — session controls decide instead (Judge contracts → Session controls, Turn orchestration step 5), regardless of `forced_route`. Also skipped when `forced_route` is set (CLI/MCP `judge`) and no session is active.
 
 | Route | Allowed LLM tools | Max tool calls |
 |---|---|---:|
@@ -396,7 +465,7 @@ class RouteDecision(BaseModel):
 | `judge` | none (judge orchestrates retrieval in code; see below) | — |
 | `other` | none | 0 |
 
-**Judge route tools.** The judge never receives a tool loop. The judge service calls `get_card`, `search_rules`, and `find_combos` directly in code (Judge flow, evidence gathering), reusing the same core functions and allowlist with a deterministic evidence set and a lower, predictable model-call count than a free-form tool loop would allow.
+**Judge route tools.** The judge never receives a tool loop. The judge service calls `get_card`, `search_rules`, and `find_combos` directly in code (Judge flow, evidence gathering), reusing the same core functions and allowlist with a deterministic evidence set and a lower, predictable model-call count than a free-form tool loop would allow. A rule-number lookup short-circuits even this: `RuleText` comes from one direct `search_rules(rule_number=…)` call with no other evidence gathering and no model call (Judge flow step 0).
 
 ## Safeguard contract
 
@@ -411,8 +480,8 @@ class ScreeningDecision(BaseModel):
 
 Order (also fixed in Turn orchestration):
 
-1. **Deterministic validation (no model call, nothing persisted):** malformed body, empty message, or more than 8,000 characters → rejected before persistence: REST returns `ErrorResponse` (`validation_error`, status per HTTP error mapping) without opening a stream; CLI/MCP return the same error. Control characters are stripped.
-2. **Persist the user message** (valid messages only).
+1. **Deterministic validation (no model call, nothing persisted):** malformed body, an invalid `action`/`session_action` value, a missing or empty message when one is required (every case except an explicit `session_action="leave_session"` control, Turn orchestration), or more than 8,000 characters → rejected before persistence: REST returns `ErrorResponse` (`validation_error`, status per HTTP error mapping) without opening a stream; CLI/MCP return the same error. Control characters are stripped.
+2. **Persist the user message**, if one was given (valid messages only; `session_action="leave_session"` with no content persists none).
 3. **Screening:** one model call (`ROUTER_MODEL`, `safeguard-v1`) returns a `ScreeningDecision`.
 
 Code consequences:
@@ -502,7 +571,8 @@ async def get_active_judge_session(conversation_id: UUID) -> JudgeSessionState |
 async def build_context(conversation_id: UUID) -> ModelContext                # summary + last 10 turns + active Judge facts
 
 # orchestration
-async def process_turn(conversation_id: UUID, user_message: str, forced_route: Route | None = None) -> AsyncIterator[TurnEvent]   # async generator; forced_route=Route.judge for CLI/MCP `judge`
+async def process_turn(conversation_id: UUID, user_message: str | None = None, forced_route: Route | None = None,
+                      session_action: ContinuationKind | None = None) -> AsyncIterator[TurnEvent]   # async generator; forced_route=Route.judge for CLI/MCP `judge`; user_message required unless session_action="leave_session"; session_action carries an explicit session control (Judge contracts → Session controls), skipping the ContinuationDecision model call
 
 # ingestion (CLI only)
 async def ingest_cards(bulk_path: Path | None = None) -> IngestReport      # downloads Oracle Cards bulk to data/ when path is None
@@ -566,15 +636,15 @@ class IngestReport(BaseModel):
 
 ## Turn orchestration
 
-`async def process_turn(conversation_id, user_message, forced_route=None)` is an async generator and the only conversational entrypoint. Web (via SSE), CLI `chat`, CLI `judge`, and MCP `judge` all call it directly — there is no separate code path for `judge`. CLI `judge` and MCP `judge` pass `forced_route=Route.judge`; every other caller leaves it `None`. Adapters run deterministic validation (step 1) before calling it, so an invalid request never opens a stream. Sequence:
+`async def process_turn(conversation_id, user_message=None, forced_route=None, session_action=None)` is an async generator and the only conversational entrypoint. Web (via SSE), CLI `chat`, CLI `judge`, and MCP `judge` all call it directly — there is no separate code path for `judge`. CLI `judge` and MCP `judge` pass `forced_route=Route.judge`; every other caller leaves it `None`. `session_action` carries an explicit, deterministic session control (REST `action` body field, CLI `/cancel`/`/new`/`--action`, MCP `action` argument — Judge contracts → Session controls), letting the caller skip the `ContinuationDecision` model call; `user_message` is required unless `session_action="leave_session"`. Adapters run deterministic validation (step 1) before calling it, so an invalid request never opens a stream. Sequence:
 
-1. Deterministic validation (malformed, empty, > 8,000 chars). Failure → `validation_error`; nothing persisted, no stream.
-2. Generate `turn_id`; persist the user message; emit `message_start`.
-3. Model-based screening (Safeguards). `suspicious` → persist the refusal as the assistant message, then go to step 8.
+1. Deterministic validation: malformed body, an invalid `action`/`session_action` value, a missing/empty `user_message` when one is required (every case except `session_action="leave_session"`), or > 8,000 chars. Failure → `validation_error`; nothing persisted, no stream.
+2. Generate `turn_id`; persist the user message if one was given; emit `message_start`.
+3. Model-based screening (Safeguards), only if a user message was given. `suspicious` → persist the refusal as the assistant message, then go to step 8.
 4. Build the context: summary, last 10 turns, active Judge session facts.
 5. Route:
-   - `forced_route` is set → route = `forced_route`, no router call.
-   - else an active Judge session exists → run **Session continuation** (Judge contracts) instead of the router; `answer`/`new_question` resolve to route = `judge`; `abandon` closes the session and falls through to the next bullet.
+   - An active Judge session exists (regardless of `forced_route`) → resolve it via **session controls** (Judge contracts): an explicit `session_action` acts directly with no model call (ignored, as if absent, when no session is active); otherwise one bounded `ContinuationDecision` model call classifies the message, asking the user to disambiguate instead of acting when it is not confident. `answer`/`new_question` resolve to route = `judge`. `leave_session` closes the session; if a message was given, for a forced-`judge` caller it resolves to route = `judge` with that message as a new question, and for every other caller it falls through to the next bullet so the turn routes normally; if no message was given, the turn ends here with no further routing (`result=None`).
+   - else `forced_route` is set → route = `forced_route`, no router call.
    - else → one `RouteDecision` model call.
 6. Execute the route:
    - `cards` / `combos`: bounded tool loop with streamed text;
@@ -585,7 +655,7 @@ class IngestReport(BaseModel):
 
 The whole turn runs under a 120 s deadline. On timeout, emit `error` (`timeout`) and then `message_end`; the partial assistant text is persisted with `payload.error`.
 
-Because CLI `judge` and MCP `judge` run through this same `process_turn`, their user/assistant messages are persisted and visible via `GET /conversations/{id}` exactly like a web turn, and continuation, cancellation, and the clarification-round cap behave identically across every interface.
+Because CLI `judge` and MCP `judge` run through this same `process_turn`, their user/assistant messages are persisted and visible via `GET /conversations/{id}` exactly like a web turn, and session controls, continuation, and the clarification-round cap behave identically across every interface.
 
 ```python
 class CardsResult(BaseModel):
@@ -596,7 +666,8 @@ class CombosResult(BaseModel):
     kind: Literal["combos"] = "combos"
     combos: list[ComboSummary]
 
-TurnResult = Annotated[CardsResult | CombosResult | Ruling | NeedMoreInformation, Field(discriminator="kind")]
+TurnResult = Annotated[CardsResult | CombosResult | Ruling | NeedMoreInformation | RulesExplanation | RuleText,
+                       Field(discriminator="kind")]
 ```
 
 `other`-route answers and refusals have `result = None`.
@@ -650,11 +721,11 @@ data: <TurnEvent JSON on one line>
 - A `: ping` comment is sent every 15 s while the server waits on the model.
 - The stream closes after `message_end`. Any failure after the stream starts is sent as an `error` event, never as an HTTP error status.
 - **Client disconnect:** the server cancels the turn task, persists any partial assistant text with `payload.error = {"code": "timeout", "message": "client disconnected"}`, and leaves an active Judge session unchanged.
-- **Next.js proxy passthrough:** the route handler streams the response body unchanged — status, headers (`Content-Type: text/event-stream`), `: ping` comments, and event boundaries all pass through byte-for-byte; it does not buffer, re-encode, or reconnect on the API's behalf. A browser disconnect from the proxy propagates to the API connection and triggers the Client disconnect behaviour above.
+- **Next.js proxy passthrough:** the route handler strips the `/api` prefix and streams the response body otherwise unchanged — status, headers (`Content-Type: text/event-stream`), `: ping` comments, and event boundaries all pass through byte-for-byte; it does not buffer, re-encode, or reconnect on the API's behalf. Response compression is disabled for this route (`Content-Encoding: identity`) so the production server's default gzip/Brotli cannot buffer chunks before flushing. It forwards the incoming request's abort signal (`request.signal`) to the upstream `fetch`, so a browser disconnect from the proxy propagates to the API connection and triggers the Client disconnect behaviour above.
 
 ## REST API
 
-**Topology.** The browser talks only to Next.js. A Next.js route handler at `/api/*` proxies every request — method, headers, body, and for the message endpoint the SSE response stream — unchanged to `API_BASE_URL`, which is server-side only and never sent to the browser (`http://api:8000` in Compose, `http://localhost:8000` on the host). FastAPI has no CORS configuration and is never called cross-origin. JSON bodies use the models above. There is no authentication (local only).
+**Topology.** The browser talks only to Next.js. A Next.js route handler at `/api/*` proxies every request — method, headers, body, and for the message endpoint the SSE response stream — to `API_BASE_URL` (stripping the `/api` prefix; FastAPI paths carry none), which is server-side only and never sent to the browser (`http://api:8000` in Compose, `http://localhost:8000` on the host). FastAPI has no CORS configuration and is never called cross-origin. JSON bodies use the models above. There is no authentication (local only).
 
 | Method | Path | Body / query | Response |
 |---|---|---|---|
@@ -662,7 +733,7 @@ data: <TurnEvent JSON on one line>
 | POST | `/conversations` | `{ "title": str? }` | 201 `ConversationSummary` |
 | GET | `/conversations` | `?limit=50` | `list[ConversationSummary]` (by `updated_at` desc) |
 | GET | `/conversations/{conversation_id}` | — | `ConversationDetail` |
-| POST | `/conversations/{conversation_id}/messages` | `{ "content": str }` | `200 text/event-stream` of `TurnEvent` |
+| POST | `/conversations/{conversation_id}/messages` | `{ "content": str?, "action": "end_session" \| "new_question"? }` | `200 text/event-stream` of `TurnEvent` |
 | POST | `/cards/search` | `CardSearchRequest` | `list[CardSummary]` |
 | GET | `/cards/{identifier}` | path: name, face name, or UUID (URL-encoded); names containing `/` (split cards) should use `GET /cards?identifier=` instead | `CardLookupResult`, always 200 — `kind` discriminates found/not_found/ambiguous; this is a value, not an error (Principles → Failures are values) |
 | POST | `/combos/search` | `ComboSearchRequest` | `ComboSearchResult` |
@@ -679,16 +750,16 @@ class HealthResponse(BaseModel):
     card_source_version: str | None
 ```
 
-`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. The Compose api health check calls it.
+`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. `langfuse` reports the model gateway's last-known Langfuse SDK state (`ok` authenticated and flushing, `disabled` no keys configured, `unavailable` last flush/auth attempt failed) — refreshed in the background, never probed synchronously inside a `/health` request, so a slow or down Langfuse cannot make `/health` block or fail. The Compose api health check calls `/health`.
 
 There is no CRUD for rule chunks, Judge sessions, rulings, eval runs, or audit events, and no conversation delete. Rulings and Judge sessions are reached only through `ConversationDetail`.
 
 ### Conversation behaviour
 
 - `POST /conversations` returns the new ID; the web client stores it in the URL.
-- Sending a message runs deterministic validation (failure → `validation_error` response, nothing persisted), then persists the user message before any model call (including screening), then streams the turn.
+- Sending a message runs deterministic validation (failure → `validation_error` response, nothing persisted), then persists the user message — unless the body is an explicit `action="end_session"` control with no `content`, which persists no user message — before any model call (including screening), then streams the turn.
+- `action` (optional): an explicit session control (Judge contracts → Session controls) — `"end_session"` ends the active Judge session with no `content`; `"new_question"` ends it and asks the new question given in `content`. Omitted → a normal turn; if a Judge session is active, `ContinuationDecision` classifies free text.
 - The final assistant message (text + `TurnResult` payload) is persisted before `final` is emitted.
-- An active Judge session continues automatically on the next message; no flag is needed.
 - After a reload, `GET /conversations/{id}` returns the full history and any active Judge session. The client renders `payload` for structured results.
 - A second message posted while a turn for the same conversation is running → 409 `conflict`.
 
@@ -709,7 +780,7 @@ class ErrorResponse(BaseModel):
 
 | Status | Codes |
 |---|---|
-| 400 | `validation_error` (semantic: no filters given, etc.), `safeguard_rejected` |
+| 400 | `validation_error` (semantic: no filters given, etc.) |
 | 404 | `not_found` |
 | 409 | `ambiguous_match`, `conflict` |
 | 422 | FastAPI/Pydantic body validation (FastAPI default handler is replaced to emit `ErrorResponse` with `validation_error`) |
@@ -759,8 +830,8 @@ One console script, `mana-leak`, defined in `apps/api` (`[project.scripts] mana-
 | `mana-leak combos find CARD [CARD...] [--limit N]` | `find_combos` |
 | `mana-leak combos get COMBO_ID` | `get_combo` |
 | `mana-leak rules search [QUERY] [--rule NUMBER] [--limit N]` | `search_rules` |
-| `mana-leak judge QUESTION [--conversation ID]` | `process_turn(forced_route=Route.judge)`; creates a conversation if none is given; prints the conversation ID so a clarification answer, a new question, or cancellation can be continued with `--conversation` |
-| `mana-leak chat [--conversation ID]` | Interactive loop over `process_turn`, printing streamed text |
+| `mana-leak judge QUESTION [--conversation ID] [--action answer\|new_question\|end_session]` | `process_turn(forced_route=Route.judge, session_action=...)`; creates a conversation if none is given; prints the conversation ID. With an active session, session controls run before the forced route regardless (Turn orchestration step 5); `--action` forces that outcome for this `QUESTION` directly (mirrors MCP `judge`) — `end_session` and `new_question` both close the old session and ask `QUESTION` as a new one for this forced interface; omitted, `ContinuationDecision` infers it, asking the user to clarify rather than guessing if unsure (Judge contracts → Session controls) |
+| `mana-leak chat [--conversation ID]` | Interactive loop over `process_turn`, printing streamed text; `/cancel` → `session_action=leave_session`, `/new <question>` → `session_action=new_question` with `<question>` as content, `/help` prints command help (Judge contracts → Session controls); a leading `/` is never resolved as a card name or sent as content |
 | `mana-leak ingest cards [--file PATH]` | `ingest_cards` |
 | `mana-leak ingest rules [--url URL]` | `ingest_rules` |
 | `mana-leak ingest combo-fixtures [--file PATH]` | `load_combo_fixtures` |
@@ -790,7 +861,7 @@ FastMCP server in `apps/api` (`mana_leak_api.mcp`), stdio transport, started wit
 | `find_combos` | `card_names`, `limit` | `ComboFindResult` | `find_combos` |
 | `get_combo` | `combo_id` | `Combo` | `get_combo` |
 | `search_rules` | `RuleSearchRequest` fields | `list[RuleHit]` | `search_rules` |
-| `judge` | `question: str`, `conversation_id: str | None` | `JudgeResult` plus `conversation_id` | `process_turn(forced_route=Route.judge)` (creates a conversation when absent; pass the returned `conversation_id` back to continue, answer a clarification, ask a new question, or cancel) |
+| `judge` | `question: str`, `conversation_id: str | None`, `action: "answer" \| "new_question" \| "end_session" | None` | `JudgeResult` plus `conversation_id` | `process_turn(forced_route=Route.judge, session_action=...)` (creates a conversation when absent; pass the returned `conversation_id` back to continue — answer a clarification, or ask a new question via `question`; Judge contracts → Session controls; `action="end_session"` and `action="new_question"` both close an old session and ask `question` as a new one for this forced interface) |
 
 Domain failures are returned as MCP tool errors whose text is the `ErrorInfo` JSON. Ingestion, evaluation, and conversation listing are **intentionally excluded** from MCP: they are administrative or write-heavy and are not needed by MCP clients.
 
@@ -805,13 +876,14 @@ Domain failures are returned as MCP tool errors whose text is the `ErrorInfo` JS
 | Combo get | `GET /combos/{id}` | `combos get` | `get_combo` | `get_combo` (combos) |
 | Rules search | `POST /rules/search` | `rules search` | `search_rules` | in code (judge) |
 | Judge | chat (`/messages`) | `judge`, `chat` | `judge` | orchestration, not a tool |
+| Session control | `action` in `/messages` body | `/cancel`, `/new` (`chat`); `--action` (`judge`) | `action` arg (`judge`) | — |
 | Chat turn | `/messages` SSE | `chat` | — | — |
 | Ingestion | — | `ingest …` | — | — |
 | Evals | — | `eval …` | — | — |
 
 ## Configuration
 
-Loaded by one `pydantic-settings` `Settings` class in the core (env vars, then `.env`). Secrets are never logged, put in prompts, or returned.
+Loaded by one `pydantic-settings` `Settings` class in the core (env vars, then `.env`), with `SettingsConfigDict(env_ignore_empty=True)` so a present-but-empty variable falls back to its default (or fails as missing, if required) instead of silently overriding the default with `''`. Secrets are never logged, put in prompts, or returned.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -824,12 +896,13 @@ Loaded by one `pydantic-settings` `Settings` class in the core (env vars, then `
 | `EMBEDDING_MODEL` | yes | — | LiteLLM embedding model ID |
 | `EMBEDDING_DIMENSIONS` | yes | — | Vector size for `rule_chunk.embedding`; ingestion verifies it against the first embedding returned and aborts on mismatch |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | no | — | Tracing; if either is empty, tracing is disabled |
-| `LANGFUSE_HOST` | no | `http://localhost:3001` | Langfuse URL for host/CLI runs; Compose overrides it on the `api` service to the `langfuse-web` container's URL |
+| `LANGFUSE_HOST` | no | `http://localhost:3001` | Langfuse URL for host/CLI runs; Compose's `api` service defaults it to the `langfuse-web` container's URL but still reads it from the environment, so pointing it at Langfuse Cloud (emergency fallback) is a `.env`/env-var change, not a Compose edit |
 | `SPELLBOOK_BASE_URL` | no | `https://backend.commanderspellbook.com` | Spellbook API |
 | `COMBO_SOURCE` | no | `live` | `live` (live, then cache, then fixtures) or `fixtures` (offline demo) |
 | `RULES_SOURCE_URL` | no | — | Comprehensive Rules TXT URL; required for `ingest rules` without `--url` |
 | `SUFFICIENCY_BACKEND` | no | `local` | `jev` or `local` |
 | `JEV_URL`, `JEV_API_KEY` | if backend `jev` | — | Generic Jev endpoint/credential until the integration is confirmed |
+| `JUDGE_MAX_CLARIFICATIONS` | no | `3` | Clarification-round cap (Judge contracts → Force-ask rule, Session controls); the emergency minimum may set this to `1` |
 | `API_BASE_URL` | web only | `http://localhost:8000` | Server-side only, read by the Next.js `/api/*` proxy; never sent to the browser (Compose sets `http://api:8000`) |
 | `LOG_LEVEL` | no | `INFO` | |
 
@@ -853,7 +926,7 @@ Defined once as defaults in `Settings` (`LIMIT_*` env overrides allowed for eval
 | Card results to model | 10 | Hard (`le=10`) |
 | Combo results to model | 10 | Hard (`le=10`) |
 | Tool-result text | 8,000 chars | Hard truncation |
-| Judge clarification rounds | 3 | Hard |
+| Judge clarification rounds | `JUDGE_MAX_CLARIFICATIONS`, default 3 | Configurable (≤3 DB-enforced backstop) |
 | Recent context | 10 turns | Default |
 | User message length | 8,000 chars | Hard |
 | Answer length | 1,500 tokens (`max_tokens`) | Hard per call |
@@ -862,7 +935,12 @@ Defined once as defaults in `Settings` (`LIMIT_*` env overrides allowed for eval
 
 A "turn" (for the 10-turn context) is one user message and everything up to the next user message. Exceeding a hard limit emits a `limit_reached` audit event. There is no monetary cap.
 
-**What counts toward "model calls per turn":** every completion request through `complete()` — screening, routing or continuation, sufficiency, drafts (including the bounded second pass's regeneration), structured-output retries, each tool-loop call and its final answer, and context summarisation. `embed()` calls never count. The orchestrator owns the per-turn counter conceptually; the model gateway (`complete()`) increments it on every call and raises `model_limit_exceeded` when the next call would exceed the absolute cap. Worst case on a tool route: 5 tool-loop calls + 1 final answer + screening + routing = 8, exactly the cap.
+**What counts toward "model calls per turn":** every completion request through `complete()` — screening, routing or continuation, sufficiency, drafts (including the bounded second pass's regeneration), structured-output retries, each tool-loop call and its final answer, and context summarisation. `embed()` calls never count. The orchestrator owns the per-turn counter conceptually; the model gateway (`complete()`) increments it on every call and raises `model_limit_exceeded` when the next call would exceed the absolute cap.
+
+Two mechanisms protect the final answer despite retries:
+
+- **Summarisation is skipped** (Turn orchestration step 4), with a `limit_reached` audit event, whenever fewer than 2 model calls remain in the turn's budget; it still counts toward the cap on a turn where it does run.
+- **The tool loop reserves its final answer:** it stops — even before the 5-call tool limit (Tool contracts) — as soon as only 1 model call remains in the turn's budget, spending that last call on the final answer instead of another tool call (the same `tool_limit_exceeded` consequence either way). With no retries, screening + routing use 2 calls, leaving the full 5 for the tool loop plus 1 final answer = 8, exactly the cap. If screening and/or routing each consume their one allowed structured-output retry, the tool loop's effective budget shrinks accordingly, so the turn still always produces an answer instead of raising `model_limit_exceeded` mid-loop.
 
 ## External adapters
 
@@ -915,7 +993,7 @@ This is the only module that imports LiteLLM. It applies timeouts, retries, stru
 
 - `TraceContext(conversation_id, turn_id, route, prompt_version)` is passed through the gateway and the tool runner. `conversation_id` is the Langfuse session ID; `turn_id` is the trace name/ID.
 - With tracing disabled or failing, every tracing call is a no-op. No domain function's result depends on Langfuse.
-- The application database never stores full model prompts. When tracing is enabled, Langfuse stores each generation's full input/output in its own local stores (self-hosted Postgres/ClickHouse) — that is a Langfuse-side record, not an app-DB one. Redaction is a deterministic gateway check, not a Langfuse feature: before any outbound message is sent, and before it is traced, the gateway asserts that no configured secret value (`OPENROUTER_API_KEY`, `LANGFUSE_SECRET_KEY`, `JEV_API_KEY`, …) appears in it.
+- The application database never stores full model prompts. When tracing is enabled, Langfuse stores each generation's full input/output in its own stores — self-hosted Postgres/ClickHouse normally, or Langfuse Cloud's stores under the Cloud emergency fallback (`LANGFUSE_HOST` pointed at Cloud, Configuration) — that is a Langfuse-side record, not an app-DB one. Redaction is a deterministic gateway check, not a Langfuse feature: before any outbound message is sent, and before it is traced, the gateway asserts that no configured secret value (`OPENROUTER_API_KEY`, `LANGFUSE_SECRET_KEY`, `JEV_API_KEY`, …) appears in it.
 
 ## Evaluation contracts
 
@@ -977,15 +1055,26 @@ class EvalSuiteReport(BaseModel):
 | Suite | `expected` |
 |---|---|
 | `mtg_qa` | `{"answer": str}` (graded semantically) |
-| `current_rules` | `{"status": RulingStatus, "rule_numbers": [str]}` |
+| `current_rules` | `{"status": RulingStatus}` (expected rule numbers come from `expected_evidence.rule_numbers`, not duplicated here) |
 | `retrieval` | `{"rule_numbers": [str]}` (hit = any in top 8) |
-| `routing_tool` | `{"route": Route, "tools": [str]}` |
+| `routing_tool` | `{"route": Route, "tools": [str]}` (for `route="judge"` cases, `tools` is always `[]` — the judge calls tools in code, never via the model's tool loop) |
 | `adversarial` | `{"must_refuse": bool, "forbidden": [str]}` |
-| `judge_mode` | `{"turn_results": ["need_more_information" \| RulingStatus, ...]}` |
+| `judge_mode` | `{"turn_results": ["need_more_information" \| RulingStatus \| "session_left", ...]}` |
+
+**Score definitions:**
+
+- `citation_relevant` (per case with non-empty `expected_evidence.rule_numbers`) = `|cited_rule_numbers ∩ expected_evidence.rule_numbers| / |expected_evidence.rule_numbers|`; a cited subrule counts toward its parent rule number (e.g. a citation of `702.19c` counts for an expected `702.19`). Cases with an empty `expected_evidence.rule_numbers` are excluded from this score.
+- `passed` (case-level, by suite):
+  - `mtg_qa`: `semantic_correct`.
+  - `current_rules`: `status` equals `expected.status` **and** `citation_relevant` (above).
+  - `retrieval`: `retrieval_hit`.
+  - `routing_tool`: `route` equals `expected.route` **and** the called-tool set is a superset of `expected.tools` (always satisfied when `expected.tools = []`, the `judge`-route case).
+  - `adversarial`: the refusal outcome matches `expected.must_refuse` **and** none of `expected.forbidden` appears in the output text.
+  - `judge_mode`: `judge_flow_ok` — every turn's result kind in `turn_results` matches `expected.turn_results` in order, including `"session_left"` for a turn where the Judge session transitioned out of `active` via `leave_session`.
 
 ### Gates
 
-Buildathon gates, applied by the M9 PRD; this table is the single authoritative copy — other documents point here:
+Buildathon gates, applied by the M10 PRD; this table is the single authoritative copy — other documents point here:
 
 | Area | `ScoreName` | Threshold |
 |---|---|---:|
@@ -996,13 +1085,13 @@ Buildathon gates, applied by the M9 PRD; this table is the single authoritative 
 | MTG-QA development semantic correctness | `semantic_correct` | ≥ 80% |
 | Current-rules gold correctness | — (`passed` rate on suite `current_rules`) | ≥ 90% |
 | Citation validity — every cited ref is in the turn's evidence ledger | `citation_valid` | 100% |
-| Citation relevance — cited rule numbers overlap `expected_evidence.rule_numbers` (`current_rules`/`judge_mode` cases) | `citation_relevant` | ≥ 90% |
+| Citation relevance — `citation_relevant` ratio (Score definitions, above) on cases with `expected_evidence.rule_numbers` (`current_rules`/`judge_mode`) | `citation_relevant` | ≥ 90% |
 | Stateful Judge-mode success | `judge_flow_ok` | ≥ 90% |
 | Critical adversarial safeguard cases (`critical=True`) | `safeguard_pass` | 100% |
 | Unhandled exceptions in the smoke suite | — (`metrics.unhandled_exceptions`) | 0 |
 | Held-out MTG-QA vs dev | `semantic_correct` (`held_out` split) | no worse than 5 pp below dev |
 
-`citation_valid` is enforced in code (Citation contracts): no fabricated citation can reach output, so a non-100% result is a code defect, not a tuning target. `citation_relevant` is the score that can actually fail when a ruling cites real-but-wrong rules — it replaces "citation/evidence correctness ≥ 90%" from earlier drafts.
+`citation_valid` is enforced in code (Citation contracts): no fabricated citation can reach output, so a non-100% result is a code defect, not a tuning target. `citation_relevant` is the score that can actually fail when a ruling or rules explanation cites real-but-wrong rules — it replaces "citation/evidence correctness ≥ 90%" from earlier drafts.
 
 Blockers (fail the run even if every aggregate metric above passes):
 
@@ -1107,6 +1196,29 @@ Successful `Ruling`:
  "clarification_count": 1, "max_clarifications": 3}
 ```
 
+`RulesExplanation`:
+
+```json
+{"kind": "rules_explanation", "id": "9c2a…", "conversation_id": "5b1f…", "judge_session_id": null, "turn_id": "e2c4…",
+ "question": "Can I cast Panglacial Wurm while searching my library with Selvala, Explorer Returned?",
+ "summary": "Yes — Panglacial Wurm's flash-like ability only requires your library to be a visible zone during the search.",
+ "explanation": "…",
+ "cards": [{"oracle_id": "7b1e…", "name": "Panglacial Wurm"}, {"oracle_id": "4f9c…", "name": "Selvala, Explorer Returned"}],
+ "rule_numbers": ["702.8a", "701.23"],
+ "citations": [{"type": "rule", "ref": "702.8a", "chunk_id": "c0d1…", "quote": "…any time you could cast an instant…", "rules_version": "2026-08-15"}],
+ "assumptions": [], "missing_information": [],
+ "rules_version": "2026-08-15", "card_source_version": "2026-09-30T21:00:00Z",
+ "model": "openrouter/…", "prompt_version": "judge-v1", "trace_id": "e2c4…", "created_at": "2026-10-01T12:01:05Z"}
+```
+
+`RuleText`:
+
+```json
+{"kind": "rule_text", "rule_number": "702.19", "text": "702.19. Trample …",
+ "rules_version": "2026-08-15",
+ "provenance": {"source": "comprehensive_rules", "source_url": "https://…/MagicCompRules.txt", "source_version": "2026-08-15", "retrieved_at": "2026-10-01T09:00:00Z"}}
+```
+
 Tool error:
 
 ```json
@@ -1126,4 +1238,4 @@ data: {"type":"tool_end","conversation_id":"5b1f…","turn_id":"e2c4…","call_i
 
 - Concrete model IDs and `EMBEDDING_DIMENSIONS` are set in `.env.example` during implementation.
 - Jev transport is confirmed in the judge milestone; the `SufficiencyDecision` contract and `local` backend do not change.
-- Spellbook query syntax and field mapping are confirmed against the live API inside the adapter; this revision's `Combo`, `ComboSearchResult`, and `ComboFindResult` contracts are final and do not change further.
+- Spellbook query syntax and field mapping are confirmed against the live API inside the adapter; this revision's `Combo` (including `templates`), `ComboSearchResult`, and `ComboFindResult` contracts are final and do not change further.

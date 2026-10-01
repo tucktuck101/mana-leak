@@ -110,6 +110,7 @@ One row per Commander Spellbook variant (the record users see as a combo). Cache
 | `results` | jsonb | no | Array of strings (the "produces" features, e.g. `"Infinite copies of Kiki-Jiki"`) |
 | `legal_commander` | boolean | yes | Spellbook legality flag when present |
 | `card_names` | text[] | no | Canonical names of pieces, denormalised for display |
+| `templates` | jsonb | yes | Spellbook `requires[]` template placeholders (non-card requirements such as "any creature with haste"); kept as Spellbook's own objects, not reduced to card names; null when the variant has no templates |
 | provenance | | | `source='commander_spellbook'`, `source_url` = combo page URL, `source_version` = Spellbook bulk `version` string (falling back to `retrieved_at`'s date) for live fetches, `fixture-<date>` for fixture loads, `retrieved_at` |
 
 Not stored: Spellbook popularity/deck counts, prices, and variant-of/alias graphs.
@@ -187,7 +188,7 @@ No status column: a conversation is open until deleted. Judge Mode state lives i
 | `turn_id` | uuid | no | Groups one user message with its responses; shared with audit events and traces |
 | `role` | text | no | `user`, `assistant`, `tool` |
 | `content` | text | no | Display text (user input, assistant answer, or a one-line tool summary) |
-| `payload` | jsonb | yes | Structured data: for `assistant`, the `TurnResult` JSON (`CardsResult`, `CombosResult`, `Ruling`, or `NeedMoreInformation`, per `contracts.md`); a `Ruling` payload duplicates the `ruling` row by design, for display without a join; for `tool`, `{tool, args, ok, result_ids, error}` |
+| `payload` | jsonb | yes | Structured data: for `assistant`, the `TurnResult` JSON (`CardsResult`, `CombosResult`, `Ruling`, `RulesExplanation`, `RuleText`, or `NeedMoreInformation`, per `contracts.md`); a `Ruling`/`RulesExplanation` payload duplicates the matching `ruling` row (`kind='ruling'`/`kind='explanation'`) by design, for display without a join; `RuleText` is payload only — deterministic rule-text lookups are never written to `ruling`; for `tool`, `{tool, args, ok, result_ids, error}` |
 | `route` | text | yes | Route chosen for the turn (`cards`, `combos`, `judge`, `other`); set on the assistant message |
 | `created_at` | timestamptz | no | |
 
@@ -205,7 +206,7 @@ Unique: (`conversation_id`, `seq`).
 | `question` | text | no | Original user question that opened the session |
 | `known_facts` | jsonb | no | Array of `{fact, source_turn_id}`, the game-state facts established so far |
 | `missing_facts` | jsonb | no | Array of strings: facts still needed; max 3 (matches `SufficiencyDecision.missing_facts` and `NeedMoreInformation`), each surfaced as a clarification question |
-| `clarification_count` | smallint | no | Default 0; `CHECK (clarification_count BETWEEN 0 AND 3)` |
+| `clarification_count` | smallint | no | Default 0; capped in code by `JUDGE_MAX_CLARIFICATIONS` (config, default 3); `CHECK (clarification_count BETWEEN 0 AND 3)` is a fixed upper-bound backstop, independent of the configured value |
 | `card_oracle_ids` | uuid[] | no | Cards identified for the question so far |
 | `created_at`, `updated_at` | timestamptz | no | |
 | `closed_at` | timestamptz | yes | Set on any terminal status |
@@ -214,24 +215,25 @@ One active session per conversation: partial unique index on (`conversation_id`)
 
 A session's final ruling is the `ruling` row whose `judge_session_id` points to it; `judge_session` holds no reference back to `ruling`.
 
-Transitions (`active → completed | exhausted | abandoned`) and the 3-round limit are enforced in code; the `CHECK` is a backstop.
+Transitions (`active → completed | exhausted | abandoned`) and the `JUDGE_MAX_CLARIFICATIONS` round limit (default 3) are enforced in code; the `CHECK (0–3)` is a fixed backstop that does not move with the configured value — an emergency override (e.g. capping at 1) changes the setting, not the schema.
 
 ### `ruling`
 
-The structured judge output. It holds the displayed explanation and *references* to evidence, not copies of the source records.
+The structured judge output: legality rulings and rules explanations share this table, distinguished by `kind`. It holds the displayed explanation and *references* to evidence, not copies of the source records. `RuleText` (exact-rule-text lookups) is never stored here — see `message.payload`.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
 | `id` | uuid | PK | |
+| `kind` | text | no | `ruling` (legality verdict) or `explanation` (`RulesExplanation`, R2-6); `CHECK (kind IN ('ruling','explanation'))` |
 | `conversation_id` | uuid | no | FK → `conversation.id`, `ON DELETE CASCADE` |
-| `judge_session_id` | uuid | yes | FK → `judge_session.id`, `ON DELETE SET NULL`; unique when non-null (at most one final ruling per session); null for rulings without clarification |
+| `judge_session_id` | uuid | yes | FK → `judge_session.id`, `ON DELETE SET NULL`; unique when non-null (at most one final ruling per session); null for rulings/explanations without an associated Judge session (always null before M7, when `judge_session` is introduced) |
 | `turn_id` | uuid | no | Turn that produced the ruling |
 | `question` | text | no | Question as ruled on (original question plus established facts) |
-| `status` | text | no | `legal`, `illegal`, `conditional`, `insufficient_information` |
+| `status` | text | yes | `legal`, `illegal`, `conditional`, `insufficient_information` when `kind='ruling'`; always null when `kind='explanation'` (`RulesExplanation` has no status field) |
 | `summary` | text | no | One- or two-sentence outcome |
 | `explanation` | text | no | Displayed explanation |
 | `assumptions` | jsonb | no | Array of strings |
-| `missing_information` | jsonb | no | Array of strings; non-empty only for `insufficient_information` |
+| `missing_information` | jsonb | no | Array of strings; non-empty only when `status='insufficient_information'`, always empty otherwise — including every `kind='explanation'` row, since `status` is null there |
 | `card_oracle_ids` | uuid[] | no | Cards involved |
 | `rule_numbers` | text[] | no | Cited rule/subrule numbers, e.g. `{702.19c,613.1}` |
 | `citations` | jsonb | no | Array of evidence references (below) |
@@ -254,7 +256,7 @@ The structured judge output. It holds the displayed explanation and *references*
 
 Three layers stay distinct: `summary`/`explanation` (what the user reads), `rule_numbers`/`card_oracle_ids`/`citations` (structured references), and `card`/`rule_chunk`/`combo` (the source data).
 
-Rulings are immutable. A corrected answer creates a new ruling.
+Rulings and explanations are immutable. A corrected answer creates a new row.
 
 ## Evaluation data
 
@@ -296,9 +298,9 @@ Append-only. One row per case execution; a group of rows sharing `run_group_id` 
 | `config` | jsonb | no | Other settings: router/embedding/grader models, limits, `rules_version`, `card_source_version` |
 | `app_version` | text | yes | Git commit SHA when available |
 | `output` | jsonb | yes | Candidate output (route, tools called, structured result, final text) |
-| `scores` | jsonb | no | `{schema_valid, route_correct, tool_success, retrieval_hit, citation_valid, citation_relevant, semantic_correct, safeguard_pass, judge_flow_ok}`; keys present only where applicable; values boolean or 0–1 |
+| `scores` | jsonb | no | `{schema_valid, route_correct, tool_success, retrieval_hit, citation_valid, citation_relevant, semantic_correct, safeguard_pass, judge_flow_ok}`; keys present only where applicable; values boolean or 0–1; see `contracts.md` → Evaluation contracts for how each score (e.g. `citation_relevant`) is computed and which suites set it |
 | `grader` | jsonb | yes | LLM-grader model, verdict, rationale |
-| `passed` | boolean | no | Case-level pass by the suite's rule |
+| `passed` | boolean | no | Case-level pass by the suite's rule; per-suite pass rules are defined in `contracts.md` → Evaluation contracts |
 | `error` | jsonb | yes | `{type, message}` for unhandled exceptions or controlled failures |
 | `usage` | jsonb | yes | `{prompt_tokens, completion_tokens, cost_usd}` when available |
 | `trace_id` | text | yes | Langfuse trace ID |
@@ -374,15 +376,17 @@ Commander legality is not indexed: it is a low-cardinality filter applied togeth
 | Upstream IDs unique within source | PKs on `card.oracle_id`, `combo.id`; unique on `rule_chunk` identity; PK on `eval_case.id` |
 | One active Judge session per conversation | Partial unique index |
 | At most one ruling per Judge session | Partial unique index on `ruling.judge_session_id` where non-null |
-| `clarification_count` between 0 and 3 | `CHECK` (backstop); code enforces the limit |
-| `ruling.status` ∈ {`legal`, `illegal`, `conditional`, `insufficient_information`} | `CHECK` |
+| `clarification_count` between 0 and 3 | `CHECK` (fixed backstop); code enforces the configured `JUDGE_MAX_CLARIFICATIONS` (default 3) |
+| `ruling.kind` ∈ {`ruling`, `explanation`} | `CHECK` |
+| `ruling.status` ∈ {`legal`, `illegal`, `conditional`, `insufficient_information`} or null | `CHECK` |
+| `ruling.kind='ruling' ⇔ status IS NOT NULL` | `CHECK` |
 | `judge_session.status` ∈ {`active`, `completed`, `exhausted`, `abandoned`} | `CHECK` |
 | `message.role` ∈ {`user`, `assistant`, `tool`} | `CHECK` |
 | `eval_case.suite` and `split` in known values | `CHECK` |
 | `rule_chunk.kind` ∈ {`rule`, `glossary`} | `CHECK` |
 | `audit_event.severity` ∈ {`info`, `warning`, `error`} | `CHECK` |
 | Provenance present on external data | `NOT NULL` on `source`, `source_version`, `retrieved_at` |
-| `insufficient_information` rulings list missing information | Application validation (Pydantic) |
+| `missing_information` empty unless `status='insufficient_information'` | Application validation (Pydantic) |
 | Citations reference evidence retrieved in the producing turn | Application validation before insert |
 | `terminal status ⇔ closed_at set` | Application code |
 
@@ -392,7 +396,7 @@ Commander legality is not indexed: it is a low-cardinality filter applied togeth
 |---|---|---|
 | Colours, colour identity, keywords, face names, combo card names, subrule numbers, ruling rule numbers/card IDs | `text[]` / `uuid[]` | Simple containment queries, GIN-indexable |
 | Card faces | `jsonb` | Variable per layout; displayed, not queried |
-| Combo prerequisites/steps/results | `jsonb` | Ordered display lists; never filtered |
+| Combo prerequisites/steps/results/templates | `jsonb` | Ordered display lists and opaque placeholder objects; never filtered |
 | Judge known/missing facts | `jsonb` | Small evolving lists owned by code |
 | Ruling assumptions, missing information, citations | `jsonb` | Structured, displayed, validated in code |
 | Message payload | `jsonb` | Varies by result type |
@@ -440,7 +444,9 @@ Rulings keep `rules_version`, `card_source_version`, rule numbers, and short quo
 
 ## Migration approach
 
-**Decision:** Alembic from the start, using autogenerate from the SQLModel metadata, with a single initial migration created in M1 and one migration per later schema change.
+**Decision:** Alembic from the start, using autogenerate from the SQLModel metadata, with a single initial migration created in M1 and one further migration per milestone that introduces or changes tables.
+
+**Sequencing:** M1's initial migration creates only `conversation` and `message` — the walking-skeleton scope (Docker Compose, FastAPI SSE, persisted/resumable chat; no cards, combos, rules, or judge yet). Every other table in this document is added by its own later migration when the milestone that needs it is reached: `card` in M3 (Cards); `combo`/`combo_card` in M4 (Combos); `rule_chunk` and `ruling` in M5 (Rules explanations) — at that point `ruling.kind` is always `'explanation'` and `status`/`judge_session_id` are unused (null), matching the pre-M7 rule that insufficiency has no session row; `judge_session` plus the `ruling.judge_session_id` FK column in M7 (Stateful Judge), once a table exists for it to reference; and `eval_case`/`eval_run` in M10 (Evaluation). M6 (Structured rulings) starts writing `kind='ruling'` rows with real `status` values using columns that already exist from M5 — no schema change. This keeps each migration scoped to the milestone that needs it, instead of front-loading the full schema in M1.
 
 **Rationale:** Conversation and eval data accumulate during the build, and `create_all` cannot alter existing tables. Generated columns (`search_tsv`), the partial unique index, `CHECK`s, and `pg_trgm` need explicit DDL, and Alembic handles that in one place. Autogenerate keeps the cost to a command.
 
@@ -459,7 +465,7 @@ Dependency note: Alembic is not yet declared in `packages/core/pyproject.toml`. 
 | `conversation` | Chat session / Langfuse session | `id` | — | — | `updated_at` |
 | `message` | Conversation messages | `id` | `conversation_id` | (`conversation_id`, `seq`) | — |
 | `judge_session` | Clarification workflow state | `id` | `conversation_id` | partial (`conversation_id`) where active | — |
-| `ruling` | Structured judge output | `id` | `conversation_id`, `judge_session_id` (nullable) | partial (`judge_session_id`) where non-null | (`conversation_id`, `created_at`) |
+| `ruling` | Structured judge output: rulings and rules explanations (`kind`) | `id` | `conversation_id`, `judge_session_id` (nullable) | partial (`judge_session_id`) where non-null | (`conversation_id`, `created_at`) |
 | `eval_case` | Frozen eval input (copy of fixtures) | `id` (text) | — | `id` | (`suite`, `split`) |
 | `eval_run` | Append-only eval results | `id` | `eval_case_id` | — | `run_group_id`, (`eval_case_id`, `started_at`) |
 | `audit_event` | Critical local events | `id` | `conversation_id` (nullable) | — | (`conversation_id`, `created_at`), (`event_type`, `created_at`) |

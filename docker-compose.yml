@@ -26,23 +26,24 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://mana_leak:${MANA_LEAK_DB_PASSWORD}@postgres:5432/mana_leak
-      # Overrides the host-default LANGFUSE_HOST=http://localhost:3001 from
-      # .env, which from inside this container would resolve to itself. Points
-      # at the langfuse-web container's URL for when the self-hosted Langfuse
-      # stack is added in M10 (langfuse-web is not yet part of this Compose
-      # file); tracing stays disabled until then because
-      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY are unset.
-      LANGFUSE_HOST: http://langfuse-web:3000
+      # Overrides the host-default LANGFUSE_HOST (unset in .env, so it falls
+      # back to the Settings class's http://localhost:3001) with the
+      # self-hosted langfuse-web container's URL for when the self-hosted
+      # Langfuse stack is added in M10 (langfuse-web is not yet part of this
+      # Compose file); tracing stays disabled until then because
+      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY are unset. Set LANGFUSE_HOST
+      # in .env (e.g. to a Langfuse Cloud URL) to override this default
+      # without editing this file.
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
+    volumes:
+      # Downloaded bulk card data (ingest_cards) and other runtime files;
+      # excluded from the image by .dockerignore, kept on the host instead.
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
 
   web:
     build:
@@ -52,8 +53,10 @@ services:
       # the API. Never exposed to the browser (no NEXT_PUBLIC_ prefix).
       API_BASE_URL: http://api:8000
     depends_on:
+      # No api healthcheck exists yet (the /health route is added in M1);
+      # wait only for the api process to start, not for it to report healthy.
       api:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "127.0.0.1:3000:3000"
 

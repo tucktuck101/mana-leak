@@ -52,6 +52,8 @@ cited ruling
 
 When a question depends on game state the player has not given, the assistant **asks a small number of targeted clarification questions**, remembers the answers, and then finishes the ruling. If it still cannot support a ruling after a bounded number of rounds, it says so and explains what is missing.
 
+Rules questions get a natural-language explanation with citations, able to walk through complex board states step by step, not just a bare verdict. If the player asks for a rule's exact wording, the assistant quotes it verbatim instead of paraphrasing. If the player asks whether something is legal or works, the assistant returns a structured, cited ruling. While a ruling conversation is open, the player can always continue it, start a new question, or step away from it; each interface offers this in whatever way fits how it is normally used there, without the player needing to know it is a distinct mode.
+
 Conversations persist, so a player can return and continue. The same capabilities are available from the web chat, a CLI, and an MCP interface, because all of them sit on the same underlying product.
 
 ## Value proposition
@@ -64,6 +66,8 @@ Compared with a general chatbot, Mana Leak provides:
 | Structured card data | Card text and properties come from a local card database, not from generated text. |
 | Structured combo data | Known combos come from Commander Spellbook, not from invention. |
 | Authoritative rules retrieval | Rulings are grounded in the current Comprehensive Rules. |
+| Readable rules explanations | Rules and interaction questions get a cited, natural-language walkthrough, including complex board states, not just a yes/no. |
+| Exact rule text on request | Asking for a specific rule returns its wording verbatim, not a paraphrase. |
 | Citations | Every ruling points to the rules and card data it used. |
 | Explicit uncertainty | The assistant can say it does not have enough information. |
 | Stateful clarification | Missing game state is asked for, not guessed. |

@@ -1599,7 +1599,7 @@ Do not rely solely on individual feature tests.
 
 Stop adding functionality once:
 
-- roadmap milestones M1–M12 are complete;
+- roadmap milestones M1–M11 are complete;
 - every required capability is demonstrable;
 - automated checks pass;
 - required eval gates pass;

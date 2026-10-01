@@ -96,10 +96,10 @@ flowchart TB
 
 | Container | Responsibility | Must not |
 |---|---|---|
-| **web** | Render chat, stream assistant output, list and resume conversations, display structured rulings and citations. The browser talks only to Next.js; a Next.js route handler proxies `/api/*` to `API_BASE_URL` server-side, with SSE streaming passthrough. | Call models, databases, or external sources; contain domain logic; expose the API directly to the browser. |
+| **web** | Render chat, stream assistant output, list and resume conversations, display structured judge answers (rulings, rules explanations, rule text) and citations. The browser talks only to Next.js; a Next.js route handler proxies `/api/*` to `API_BASE_URL` server-side, with SSE streaming passthrough. | Call models, databases, or external sources; contain domain logic; expose the API directly to the browser. |
 | **api** | HTTP adapter: streamed chat endpoint, REST endpoints for conversations, cards, combos, rules, and health. Translates HTTP to core calls and core results/events to HTTP/SSE. | Implement search, retrieval, routing, or judging. |
 | **shared core** | All domain and application logic (below). A library, not a separate service. | Know about HTTP, SSE, CLI parsing, or MCP framing. |
-| **CLI** | Thin command-line adapter over the core, used for demos, ingestion, and evals. Runs on the host (or via `docker compose exec api`). | Duplicate core logic. |
+| **CLI** | Thin command-line adapter over the core, used for demos, ingestion, and evals. Runs on the host via `uv` or via `docker compose exec api`; the api image includes `evals/fixtures` and Compose mounts `./data`, so ingestion and evals work in both. | Duplicate core logic. |
 | **MCP server** | Thin FastMCP adapter exposing core capabilities as MCP tools. | Duplicate core logic or widen tool permissions. |
 | **postgres** | One PostgreSQL 16 server with pgvector. `mana_leak` holds application state, cards, rules chunks, and embeddings. `langfuse` is owned by Langfuse. | Mix Langfuse and application tables. |
 | **Langfuse stack** | Self-hosted tracing UI and ingestion. Its components follow the current official Langfuse Docker Compose for the pinned version. | Become an application dependency for answering. |
@@ -132,7 +132,7 @@ flowchart LR
     llm[Model gateway<br/>LiteLLM] --- router & runner & judge & guard
 ```
 
-**Turn orchestrator.** `process_turn` is the single entrypoint for a conversational turn, used by every adapter — including CLI `judge` and MCP `judge`, which call it with the route forced to `judge` so both get the same screening, persistence, and continuation semantics as web. It sequences screening, context building, routing, the tool loop or judge, persistence, and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
+**Turn orchestrator.** `process_turn` is the single entrypoint for a conversational turn, used by every adapter — including CLI `judge` and MCP `judge`, which call it with the route forced to `judge`. Each turn is sequenced: (1) if a Judge session is active for the conversation, session controls and the continuation decision resolve the turn regardless of any forced route; (2) otherwise, an adapter-forced route (as CLI/MCP `judge` sets) is used; (3) otherwise, the router classifies it. For a forced-`judge` caller, a `leave_session` continuation resolves to a new judge question rather than an unrouted turn, so CLI and MCP `judge` get the same screening, persistence, and continuation semantics as web. After routing it runs the tool loop or judge, then persistence and tracing. It enforces the per-turn timeout and the model-call cap. It emits typed events (text deltas, tool activity, final structured result, errors) that adapters render; the API turns them into SSE.
 
 **Model gateway.** A small wrapper over LiteLLM/OpenRouter used by every model call. It applies the model timeout, the structured-output retry, and the transient-failure retries, and attaches tracing metadata. Model identifiers come from configuration.
 
@@ -144,7 +144,7 @@ flowchart LR
 
 **Rules retrieval.** Runtime search over indexed rule chunks: pgvector semantic search, PostgreSQL full-text search, and direct lookup by rule number. It returns at most 8 chunks, each with a stable rule number and provenance for citation.
 
-**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer. With an active Judge session, routing is skipped: deterministic cancel phrases ("cancel", "never mind", "stop") abandon the session without a model call; otherwise one bounded model call returns a `ContinuationDecision` (`answer`, `new_question`, or `abandon`). `answer` adds the message to known facts and re-judges; `new_question` abandons the old session and starts a new judge flow; `abandon` abandons the session and routes the turn normally.
+**Router.** Classifies a turn into exactly one of `cards`, `combos`, `judge`, or `other`. It produces a route label, not an answer; it runs only in step 3 of the turn orchestrator's sequence (see Turn orchestrator), after the active-session check and any forced route. With a Judge session active, session controls take over instead of the router, following the conventions of the calling interface: an explicit "End session"/"New chat" action in the web UI, `/cancel` or `/new <question>` in the CLI, or an `action` argument on MCP's `judge` tool. These are explicit actions, never text matching — plain text such as "cancel" is never treated as intent to leave (it may be a card name). Without an explicit control, one bounded model call returns a `ContinuationDecision` (`answer`, `new_question`, or `leave_session`); when it cannot tell (for example, a bare word that is both a card name and an intent), the assistant asks the user to clarify rather than guessing. `answer` adds the message to known facts and re-judges; `new_question` leaves the old session and starts a new judge flow; `leave_session` leaves the session and routes the turn normally.
 
 **Tool runner.** The bounded tool-calling loop. It exposes only the route's allowlisted tools to the model, validates every tool call's arguments against its schema, executes the matching core service, shapes and truncates results, and returns failures to the model as structured tool errors instead of raising. It stops after 5 tool steps.
 
@@ -155,17 +155,17 @@ flowchart LR
 | `judge` | none (judge calls card lookup, rules search, combo find in code) |
 | `other` | none |
 
-**Judge service.** Produces rulings. It gathers card evidence and rules evidence (and combo records where relevant), runs a bounded sufficiency decision on whether the evidence and stated game state support a ruling, and either produces a validated structured ruling or asks for clarification. Ruling statuses are `legal`, `illegal`, `conditional`, and `insufficient_information`. After generation, code checks citations: every cited rule number, card, and combo must appear in the evidence actually retrieved for that turn. A ruling with an unverifiable citation is rejected (one regeneration attempt, then a controlled `insufficient_information`).
+**Judge service.** Answers rules questions, choosing one of three answer kinds. A rule-number lookup ("what does rule 702.19 say?") returns `RuleText`: a deterministic lookup, quoted verbatim, with no model paraphrase. For every other rules question it gathers evidence — the cards identified in the turn (named in the message, the prior assistant result only, or the active session's `card_oracle_ids`, capped at 10), rules chunks, and combo records where relevant — runs a bounded sufficiency decision on whether that evidence and the stated game state support an answer, and either produces a validated structured answer or asks for clarification. The judge itself chooses between `RulesExplanation` (a cited natural-language explanation, the default for rules/interaction questions) and `Ruling` (`legal`, `illegal`, `conditional`, or `insufficient_information`, when the question asks whether something is legal, works, or is allowed). After generation, code checks citations: every cited rule number and combo, and every *involved* card (an identified card the draft actually names or cites), must appear in the evidence actually retrieved for that turn. An answer with an unverifiable citation is rejected (one regeneration attempt, then a controlled `insufficient_information`).
 
 **Sufficiency decision (Jev role).** The "is this enough to rule?" step is the bounded decision where Jev is used. Its output is a small typed result: sufficient, or insufficient with a list of missing facts. Code owns the consequence. If Jev is unavailable, a local model call with the same output schema substitutes. Jev is never the source of the rules conclusion.
 
-**Judge-session state.** A persisted record per active clarification workflow: the original question, known game-state facts, missing facts, clarification count, status, and the final ruling. Code owns all transitions. At most 3 clarification rounds; after that the session closes with `insufficient_information` and an explanation of what is missing.
+**Judge-session state.** A persisted record per active clarification workflow: the original question, known game-state facts, missing facts, clarification count, status, and the final answer (ruling, rules explanation, or rule text). Code owns all transitions. At most 3 clarification rounds; after that the session closes with `insufficient_information` and an explanation of what is missing.
 
 **Conversation service.** Persists conversations and messages, supports resume after reload, and builds the bounded model context. The conversation ID is the Langfuse session ID and is attached to Judge sessions, rulings, and audit events.
 
 **Safeguards.** Input screening (length cap, malformed input, a bounded classifier returning `clear`, `suspicious`, or `uncertain`), separation of instructions from data in prompts, tool allowlists, ensuring secrets never enter prompts, logs, or error messages, and hard execution limits. Code decides the consequence of a screening result: continue, continue with heightened restriction, or refuse safely.
 
-**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down. The application database stores no prompts; Langfuse stores generation input/output (full prompts and completions) in its own local stores, separate from `mana_leak`. Secrets never enter prompts, so there is nothing for Langfuse to redact.
+**Observability.** Langfuse tracing of each turn: route, screening result, model calls with token and cost metadata, tool calls and results, retrieval source IDs, Judge transitions, retries, and limit events. Critical events are also written as audit events in the application database, so they survive if Langfuse is down. The application database stores no prompts; Langfuse stores generation input/output (full prompts and completions) in its own local stores, separate from `mana_leak` — or, under the Cloud emergency fallback (see Local deployment), in Langfuse Cloud's stores instead. Secrets never enter prompts, so there is nothing for Langfuse to redact. The API's health response reports Langfuse status from the SDK's last cached state, never a synchronous per-request probe, so Langfuse downtime cannot flap API liveness.
 
 ## Request flows
 
@@ -202,7 +202,7 @@ User → router(combos) → tool runner → card lookup (resolve names)
      → ≤10 structured combos with record IDs → model explanation → response
 ```
 
-### Rules judge
+### Judge
 
 ```mermaid
 sequenceDiagram
@@ -220,14 +220,16 @@ sequenceDiagram
     O->>R: classify
     R-->>O: judge
     O->>J: question + context
-    J->>C: look up involved cards
+    J->>C: look up identified cards
     J->>RR: retrieve ≤8 rule chunks
     J->>JV: evidence + stated state sufficient?
     JV-->>J: sufficient
-    J->>J: generate structured ruling, validate schema, verify citations
-    J-->>O: Ruling (status, explanation, cards, rules, citations)
+    J->>J: choose answer kind, generate structured answer, validate schema, verify citations
+    J-->>O: RulesExplanation | Ruling (kind, status/summary, explanation, cards, rules, citations)
     O-->>U: cited explanation
 ```
+
+A rule-number lookup ("what does rule 702.19 say?") skips sufficiency and generation entirely: deterministic lookup returns `RuleText` — the quoted rule and its provenance, no model paraphrase.
 
 ### Missing state
 
@@ -237,7 +239,7 @@ stateDiagram-v2
     Evaluating --> Ruled: sufficient
     Evaluating --> AwaitingClarification: insufficient (persist session, ask)
     AwaitingClarification --> Evaluating: continuation=answer (update facts, round += 1)
-    AwaitingClarification --> Abandoned: continuation=abandon (cancel phrase or model)
+    AwaitingClarification --> Abandoned: continuation=leave_session (explicit control or model classification)
     AwaitingClarification --> Abandoned: continuation=new_question (old session abandoned, new judge flow starts)
     Evaluating --> Exhausted: insufficient and round = 3
     Ruled --> [*]: close session
@@ -292,7 +294,7 @@ flowchart TB
 - Only application instructions occupy the system role. Everything else enters the prompt as clearly delimited data.
 - Retrieved rules text, card text, and combo descriptions are evidence to reason over. Instructions found inside them are ignored.
 - User messages are untrusted. Screening runs before routing. Oversized or malformed input is rejected by code without a model call.
-- Model output is a proposal. Tool calls are validated against schemas and allowlists; rulings are validated against the schema and citation check before they reach the user.
+- Model output is a proposal. Tool calls are validated against schemas and allowlists; judge answers (rulings, rules explanations) are validated against the schema and citation check before they reach the user; rule-text lookups are deterministic and never model-generated.
 - The model has no filesystem, shell, network, or database-write tools. All domain tools are read-only.
 - Secrets live only in environment configuration. They are never placed in prompts, tool results, traces, or error messages.
 
@@ -346,7 +348,7 @@ Comprehensive Rules (text release)
 ```
 
 - Rules are the only embedded corpus. Cards and combos are retrieved through structured queries.
-- Retrieval combines semantic and keyword results with a simple merge. Reranking is added only if evaluation shows it is needed.
+- Retrieval combines two legs with a simple merge, each searching different text: the semantic leg embeds the question plus the identified cards' names and the first 300 characters of each card's Oracle text; the keyword leg runs PostgreSQL full-text search on the question alone, using OR-semantics (`websearch_to_tsquery` on the question, falling back to an OR-joined `to_tsquery` over extracted lexemes if that parses empty) so a long, multi-card question still matches. Reranking is added only if evaluation shows it is needed.
 - Every chunk keeps its rule number, heading, source URL, rules version (effective date), and retrieval timestamp. Citations display the rule number.
 - The embedding model is fixed per index. Changing it requires re-ingestion.
 
@@ -397,8 +399,8 @@ Docker Compose on `localhost` is the only deployment target. `docker compose up 
 - **postgres**: PostgreSQL 16 + pgvector, named volume, health check. An init script creates the `mana_leak` and `langfuse` databases with separate users and enables `vector` only in `mana_leak`.
 - **api**: FastAPI, depends on a healthy `postgres`, and reaches it through the Compose network.
 - **web**: Next.js standalone build; calls the API.
-- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. Added in M10, not before; the current `docker-compose.yml` marks the slot until then. If self-hosting exceeds a 2-hour time box in M10, fall back to a Langfuse Cloud project using the same SDK (emergency fallback only, never the default plan).
-- **CLI and MCP** run from the same Python environment as the API: on the host via `uv`, or inside the api container.
+- **Langfuse**: `langfuse-web`, `langfuse-worker`, ClickHouse, Redis/Valkey, and MinIO, configured per the official Langfuse self-hosting Compose for the pinned version, using the `langfuse` database. Added in M2, not before; the current `docker-compose.yml` marks the slot until then. If self-hosting the Langfuse stack does not work, fall back to a Langfuse Cloud project using the same SDK (emergency fallback only, never the default plan); under the Cloud fallback, generation input/output is stored by Langfuse Cloud instead of the local stack, so user text, card text, and rules excerpts leave the machine.
+- **CLI and MCP** run from the same Python environment as the API, on the host via `uv` or inside the api container (which includes `evals/fixtures` and mounts `./data`).
 - Data import and rules ingestion are explicit commands run before the demo. Imported data persists in the named Postgres volume. Bulk downloads stay in the git-ignored `data/` directory.
 
 ## Data boundaries
@@ -442,9 +444,9 @@ Evaluation is a first-class part of the system but is separate from runtime auth
 | Adversarial/safeguard | 15 |
 | Stateful Judge mode | 10 |
 
-The 3 `judge_mode` smoke cases are one completed ruling, one exhausted (clarification rounds used up), and one abandoned continuation.
+The 3 `judge_mode` smoke cases are one completed answer (ruling or rules explanation), one exhausted (clarification rounds used up), and one where the user leaves the session mid-clarification (`continuation=leave_session`).
 
-The harness records model, prompt, and configuration versions with every run, so results are comparable. Gate thresholds and blockers are defined in `contracts.md` → "Evaluation contracts" → "Gates"; run cadence is defined in the M9 PRD.
+The harness records model, prompt, and configuration versions with every run, so results are comparable. Gate thresholds and blockers are defined in `contracts.md` → "Evaluation contracts" → "Gates"; run cadence is defined in the M10 PRD.
 
 ## Architectural decisions
 

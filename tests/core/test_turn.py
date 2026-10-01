@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
-from mana_leak_api.sse import sse_stream
+from mana_leak_api.sse import resume_stream, sse_stream
 from mana_leak_core import conversations, gateway, orchestrator, tracing
 from mana_leak_core import db as db_module
 from mana_leak_core.contracts.enums import AuditEventType, MessageRole, Route
@@ -808,27 +808,24 @@ def _parse_sse(raw: str) -> list[tuple[str, dict[str, Any]]]:
     return events
 
 
-async def _sse_turn(
-    conversation_id: uuid.UUID, content: str
-) -> list[tuple[str, dict[str, Any]]]:
-    """One turn through `sse.py`'s encoder, driven the way the API drives it
-    -- not by iterating `process_turn` directly (PRD §8, plan -> WP5
-    checklist).
+async def _sse_turn(conversation_id: uuid.UUID, content: str) -> list[tuple[str, dict[str, Any]]]:
+    """One turn through `sse.py`'s encoder, driven exactly the way
+    `routers/messages.py` drives it -- not by iterating `process_turn`
+    directly (PRD §8, plan -> WP5 checklist).
 
     Which task drives the turn generator is part of what is under test: an
     OpenTelemetry context attached in one task and detached in another is
     exactly the failure AC-4's "no tracing error is logged" rules out, and it
-    is invisible when a test iterates the orchestrator itself.
-
-    This mirrors the router: the first `__anext__` is pulled by the caller so
-    a pre-stream `ManaLeakError` (conflict, or AC-8's secret check) maps to
-    an HTTP status instead of an in-stream event. That split is itself the
-    bug WP6 fixes by starting `sse_stream`'s producer task first; when it
-    lands, this helper follows the new call shape.
+    is invisible when a test iterates the orchestrator itself. `sse_stream`
+    owns the one producer task and pulls `process_turn`'s very first event
+    inside it; the caller only takes the first already-*encoded* chunk, so a
+    pre-stream `ManaLeakError` (conflict, or AC-8's secret check below) still
+    surfaces here rather than as an in-stream event.
     """
     agen = orchestrator.process_turn(conversation_id, content)
-    first_event = await anext(agen)
-    raw = b"".join([chunk async for chunk in sse_stream(agen, first_event)])
+    stream = sse_stream(agen)
+    first_chunk = await anext(stream)
+    raw = b"".join([chunk async for chunk in resume_stream(first_chunk, stream)])
     return _parse_sse(raw.decode())
 
 
@@ -893,11 +890,10 @@ async def test_a_traced_turn_logs_no_opentelemetry_context_error(
     task and left in another. Verified reproducible both ways in isolation,
     so this assertion is a real guard, not a formality.
 
-    It fails until the SSE adapter starts its producer task before the first
-    event (plan -> WP6 checklist, F1): today the route pulls `message_start`
-    in the request task and the producer task pulls the rest, which splits
-    this `with` block across two contexts. Nothing in `orchestrator.py` can
-    fix that from its side -- a turn generator cannot choose its driver.
+    This is the regression guard for `sse.py`'s single-producer-task
+    contract: pulling `process_turn`'s first event outside that task splits
+    the `with` block across two contexts, and `orchestrator.py` cannot fix
+    that from its side -- a turn generator does not choose its driver.
     """
     fake_gateway(deltas=("Mana ", "Leak."))
     conversation_id = await _new_conversation()

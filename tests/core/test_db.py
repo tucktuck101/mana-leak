@@ -219,7 +219,8 @@ async def _session_against_test_db(monkeypatch: pytest.MonkeyPatch, _migrated_te
 
     from mana_leak_core.settings import get_settings
 
-    test_url = make_url(get_settings().database_url).set(database="mana_leak_test")
+    raw_url = get_settings().database_url.get_secret_value()
+    test_url = make_url(raw_url).set(database="mana_leak_test")
     monkeypatch.setenv("DATABASE_URL", test_url.render_as_string(hide_password=False))
     get_settings.cache_clear()
     db_module.get_engine.cache_clear()

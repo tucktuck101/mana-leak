@@ -1,4 +1,4 @@
-Current activity: M1 — Walking skeleton is Complete (2026-10-01). Next milestone: M2 — Observability (self-hosted Langfuse).
+Current activity: M2 — Observability. PRD drafted (docs/prds/M2-observability.md, Proposed); Langfuse stack, INIT vars, SDK v4 API verified and recorded in its Risks.
 
 Done:
 - M1 PRD + plan Complete; ROADMAP M1 = Complete. Verification log in docs/prds/M1-walking-skeleton.plan.md.
@@ -6,8 +6,8 @@ Done:
 
 In flight: nothing. Compose stack (postgres/api/web) is running.
 
-Waiting on user: (1) OpenRouter key rotation (optional, user's call); (2) go-ahead to start M2 PRD.
+Waiting on user: M2 PRD review; decision on per-worktree test DB isolation (PRD open issue).
 
 Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
 
-Next action: derive docs/prds/M2-observability.md from ROADMAP M2 per docs/prds/README.md; user reviews it.
+Next action: after user review + approval, write docs/prds/M2-observability.plan.md (do not dispatch until plan approved).

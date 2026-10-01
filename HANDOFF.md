@@ -7,6 +7,5 @@ Done:
 
 In flight: nothing.
 Waiting on user: user is reviewing docs/prds/M1-walking-skeleton.md personally before any review gate.
-Waiting on user: Fable bucket at 4% (< 5% threshold; resets 2026-10-01 15:00 UTC). Asked whether to run the M1 PRD review gate with codex instead.
 
 Next action: run review gate (AGENTS.md §49a) on docs/prds/M1-walking-skeleton.md with the chosen reviewer; on pass set Status: Approved, then write docs/prds/M1-walking-skeleton.plan.md and build.

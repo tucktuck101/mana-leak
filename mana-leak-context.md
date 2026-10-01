@@ -1,5 +1,7 @@
 # Mana Leak — Project Context
 
+> **Historical input, not an authority source.** This document predates and is superseded by `docs/vision.md`, `docs/architecture.md`, `docs/data-model.md`, `docs/contracts.md`, `ROADMAP.md`, and `AGENTS.md`. It is not part of the `AGENTS.md` authority hierarchy. Known-superseded content in this file: references to a `build-plan.md` (does not exist; the actual flow is ROADMAP → PRD → PRD plan); milestone numbering (see `ROADMAP.md` for current M1–M12); the smoke suite composition (now 28 cases: 10 mtg_qa + 5 current_rules + 5 routing_tool + 5 adversarial + 3 judge_mode, not the 25 described here); gate thresholds and blocker conditions (now live in `contracts.md` → "Evaluation contracts" → "Gates"); and the judge-tool-exposure and SSE-streaming decisions described here (superseded by `contracts.md`: judge exposes no tools to the model and orchestrates retrieval in code; streaming uses Mana Leak's own SSE format, not an AI SDK protocol-compatibility claim).
+
 ## Project summary
 
 **Mana Leak** is a 24-hour solo buildathon project: a local-first, EDH-focused AI assistant for card search, Commander combo discovery, and evidence-grounded MTG rules judging.

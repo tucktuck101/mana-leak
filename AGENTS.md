@@ -122,6 +122,10 @@ Interpretation:
 - a PRD plan defines how that PRD is implemented: work packages, sequence, tests, and progress. Its next incomplete step is the current slice.
 - implementation shows what currently exists.
 
+Among the tier-2 design docs, the default order above applies for overlaps of scope; where two tier-2 docs both speak to the same question, use this tie-break: `contracts.md` wins for interface/behaviour questions; `architecture.md` wins for ownership/boundary questions; `data-model.md` wins for persistence questions.
+
+`mana-leak-context.md` is historical input that informed this repo's design; it is not in the authority order above and is not an authority. Do not cite it to resolve a conflict or to source a current decision — use the docs in the hierarchy.
+
 Do not silently resolve contradictions.
 
 If two sources conflict:
@@ -349,7 +353,7 @@ If the settled design proves impossible or disproportionately costly within the 
 1. verify the problem is real;
 2. identify the smallest deviation;
 3. preserve external behaviour where possible;
-4. record the deviation;
+4. record the deviation in `ROADMAP.md` → "Decisions & deviations" (amendment rule: implementation evidence → record in Decisions & deviations → update the owning doc deliberately → update downstream docs);
 5. continue.
 
 Do not use implementation difficulty as an excuse for an unrelated redesign.
@@ -1337,7 +1341,7 @@ For each finding:
 
 # 49a. Review gates (review–repair cycle)
 
-Before a phase boundary (design docs → PRDs, PRD → PRD plan, PRD plan → implementation, milestone → Complete), run a review gate:
+Before a phase boundary (design docs → PRDs, PRD → PRD plan, PRD plan → implementation, milestone → Complete), run a review gate. Repairs are fanned out one subagent per file in parallel, with shared decisions fixed first:
 
 ```text
 independent adversarial review (a different model/agent from the author)
@@ -1442,12 +1446,32 @@ Before relying on a prior decision, ensure it exists in:
 
 - authoritative docs;
 - the active PRD and PRD plan;
-- decision/deviation record;
+- `ROADMAP.md` "Decisions & deviations";
 - code/tests where appropriate.
 
 Do not rely on “the previous agent knew this”.
 
 Every task should be recoverable from repository state.
+
+---
+
+# 53a. Session resume (`continue`)
+
+Sessions will end mid-task. `HANDOFF.md` at the repo root is the single resume point.
+
+- If the user's message is `continue` (or similar) with no other instruction: read `HANDOFF.md` first, verify its claims against `git status`/`git log`, then resume from its **Next action**. Do not restart completed steps.
+- Update `HANDOFF.md` whenever the active step changes, before starting long-running work (subagents, evals, ingestion), and before ending a turn. Commit it with the related work.
+- Keep it short (under ~40 lines), overwrite rather than append:
+
+```text
+Current activity: <roadmap milestone / PRD / plan step, or review gate round N>
+Done this activity: <bullets>
+In flight: <subagents/jobs and what they were editing; uncommitted files>
+Waiting on user: <open questions, verbatim>
+Next action: <one concrete step>
+```
+
+If `HANDOFF.md` and the repository disagree, the repository wins; fix `HANDOFF.md` before continuing.
 
 ---
 

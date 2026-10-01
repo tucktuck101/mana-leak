@@ -9,6 +9,7 @@ are attributed to, and outbound secret redaction. Every test except the one
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -16,11 +17,13 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from mana_leak_core import gateway
-from mana_leak_core.contracts.enums import AuditEventType, Severity
+from litellm.types.utils import Usage
+from mana_leak_core import gateway, tracing
+from mana_leak_core.contracts.enums import AuditEventType, Route, Severity
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
 from mana_leak_core.db.models import AuditEvent
 from mana_leak_core.settings import Settings, get_settings
+from mana_leak_core.tracing import TraceContext
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -85,6 +88,13 @@ def _fake_chunk(delta: str | None, finish_reason: str | None) -> SimpleNamespace
     )
 
 
+def _fake_usage_chunk(usage: Usage) -> SimpleNamespace:
+    """The terminal chunk `stream_options={"include_usage": True}` makes
+    LiteLLM emit: no choices at all, the provider's usage attached
+    (verified against `litellm`'s own `streaming_handler.py`)."""
+    return SimpleNamespace(choices=[], usage=usage)
+
+
 class FakeLiteLLM:
     """Records every `acompletion(**kwargs)` call and replays a scripted
     response: a plain non-streaming result, an async-iterable of chunks for
@@ -98,6 +108,7 @@ class FakeLiteLLM:
         chunks: list[tuple[str | None, str | None]] | None = None,
         hang_s: float | None = None,
         hang_after_chunk: bool = False,
+        usage: Usage | None = None,
     ) -> None:
         self.text = text
         self.finish_reason = finish_reason
@@ -106,6 +117,7 @@ class FakeLiteLLM:
         )
         self.hang_s = hang_s
         self.hang_after_chunk = hang_after_chunk
+        self.usage = usage
         self.calls: list[dict[str, Any]] = []
 
     async def acompletion(self, **kwargs: Any) -> Any:
@@ -114,7 +126,10 @@ class FakeLiteLLM:
             return self._stream()
         if self.hang_s is not None:
             await asyncio.sleep(self.hang_s)
-        return _fake_message(self.text, self.finish_reason)
+        response = _fake_message(self.text, self.finish_reason)
+        if self.usage is not None:
+            response.usage = self.usage
+        return response
 
     async def _stream(self) -> AsyncIterator[Any]:
         if self.hang_s is not None and not self.hang_after_chunk:
@@ -123,6 +138,8 @@ class FakeLiteLLM:
             if self.hang_s is not None and self.hang_after_chunk and i == 1:
                 await asyncio.sleep(self.hang_s)
             yield _fake_chunk(delta, finish_reason)
+        if self.usage is not None:
+            yield _fake_usage_chunk(self.usage)
 
 
 @pytest.fixture
@@ -436,6 +453,177 @@ async def test_redaction_allows_ordinary_messages(fake_litellm) -> None:
     )  # no raise
 
 
+async def test_check_no_secrets_is_callable_directly_by_other_core_modules() -> None:
+    """`orchestrator.py` (M2 WP5) calls this same check on the user message
+    before it opens the turn trace, so the fail-closed guarantee covers
+    Langfuse input too (M2 PRD NFR-2). Public name, same behaviour."""
+    settings = get_settings()
+    secret = settings.openrouter_api_key.get_secret_value()
+
+    gateway.check_no_secrets([{"role": "user", "content": "how does cascade work?"}], settings)
+
+    with pytest.raises(ManaLeakError) as excinfo:
+        gateway.check_no_secrets([{"role": "user", "content": f"key: {secret}"}], settings)
+    assert excinfo.value.code is ErrorCode.internal_error
+    assert secret not in str(excinfo.value)
+
+
+# --- Generation observations (M2 FR-4, FR-5, AC-4) ---------------------------
+
+
+def _trace() -> TraceContext:
+    return TraceContext(conversation_id=uuid4(), turn_id=uuid4(), route=Route.other)
+
+
+def _attr(span, name: str) -> Any:
+    return span.attributes.get(f"langfuse.observation.{name}")
+
+
+async def _drain(stream: AsyncIterator[gateway.ModelChunk]) -> list[gateway.ModelChunk]:
+    return [chunk async for chunk in stream]
+
+
+async def test_streaming_asks_the_provider_for_usage(fake_litellm) -> None:
+    """Without `stream_options={"include_usage": True}` LiteLLM never
+    populates `.usage` on a streamed chunk, so FR-5's token counts would
+    not exist at all. Non-streaming calls carry usage already."""
+    fake = fake_litellm()
+    await _drain(
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m", stream=True)
+    )
+    await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+
+    assert fake.calls[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in fake.calls[1]
+
+
+async def test_streaming_terminal_usage_chunk_is_consumed_not_yielded(fake_litellm) -> None:
+    """The usage-only chunk has `choices == []`; indexing it would raise
+    `IndexError` on every real streamed turn, and it carries no text to
+    surface to the caller."""
+    fake_litellm(
+        chunks=[("hel", None), ("lo", None), (None, "stop")],
+        usage=Usage(prompt_tokens=11, completion_tokens=5, total_tokens=16),
+    )
+
+    chunks = await _drain(
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m", stream=True)
+    )
+
+    assert "".join(chunk.delta for chunk in chunks) == "hello"
+    assert chunks[-1].finish_reason == "stop"
+
+
+async def test_streamed_generation_is_a_child_of_the_turn_trace(fake_litellm, span_capture) -> None:
+    """AC-4: one turn-level trace with the model call recorded as its child
+    generation -- never a second root span -- carrying the provider's token
+    counts and cost."""
+    fake_litellm(
+        chunks=[("hel", None), ("lo", None), (None, "stop")],
+        usage=Usage(prompt_tokens=11, completion_tokens=5, total_tokens=16, cost=0.00042),
+    )
+    trace = _trace()
+
+    with tracing.start_turn_trace(trace, input="hi"):
+        chunks = await _drain(
+            await gateway.complete(
+                [{"role": "user", "content": "hi"}], model="m/x", stream=True, trace=trace
+            )
+        )
+
+    assert "".join(chunk.delta for chunk in chunks) == "hello"
+    spans = span_capture.finished_spans()
+    assert sorted(span.name for span in spans) == sorted(["m/x", str(trace.turn_id)])
+    turn_span = span_capture.span_named(str(trace.turn_id))
+    generation = span_capture.span_named("m/x")
+    assert generation.parent is not None
+    assert generation.parent.span_id == turn_span.context.span_id
+    assert format(generation.context.trace_id, "032x") == trace.turn_id.hex
+    assert _attr(generation, "type") == "generation"
+    assert _attr(generation, "model.name") == "m/x"
+    assert json.loads(_attr(generation, "input")) == [{"role": "user", "content": "hi"}]
+    assert _attr(generation, "output") == "hello"
+    assert json.loads(_attr(generation, "usage_details")) == {"input": 11, "output": 5, "total": 16}
+    assert json.loads(_attr(generation, "cost_details")) == {"total": 0.00042}
+
+
+async def test_generation_reports_no_cost_when_the_provider_reports_none(
+    fake_litellm, span_capture
+) -> None:
+    """`litellm`'s `Usage` *deletes* `cost` when the provider reported none
+    (verified: attribute access raises `AttributeError`), so the gateway
+    must read it defensively and record an explicit null rather than a
+    fabricated number (FR-5, AC-4)."""
+    usage = Usage(prompt_tokens=7, completion_tokens=2, total_tokens=9)
+    assert not hasattr(usage, "cost")  # the shape this test exists for
+    fake_litellm(chunks=[("ok", "stop")], usage=usage)
+    trace = _trace()
+
+    with tracing.start_turn_trace(trace, input="hi"):
+        await _drain(
+            await gateway.complete(
+                [{"role": "user", "content": "hi"}], model="m/x", stream=True, trace=trace
+            )
+        )
+
+    generation = span_capture.span_named("m/x")
+    assert json.loads(_attr(generation, "usage_details")) == {"input": 7, "output": 2, "total": 9}
+    assert _attr(generation, "cost_details") is None
+
+
+async def test_non_streaming_call_is_recorded_as_a_generation(fake_litellm, span_capture) -> None:
+    fake_litellm(
+        text="the answer",
+        usage=Usage(prompt_tokens=3, completion_tokens=4, total_tokens=7, cost=0.001),
+    )
+    trace = _trace()
+
+    with tracing.start_turn_trace(trace, input="hi"):
+        result = await gateway.complete(
+            [{"role": "user", "content": "hi"}], model="m/x", trace=trace
+        )
+
+    assert result.text == "the answer"
+    generation = span_capture.span_named("m/x")
+    assert generation.parent is not None
+    assert generation.parent.span_id == span_capture.span_named(str(trace.turn_id)).context.span_id
+    assert _attr(generation, "output") == "the answer"
+    assert json.loads(_attr(generation, "usage_details")) == {"input": 3, "output": 4, "total": 7}
+
+
+async def test_no_generation_is_recorded_without_a_trace(fake_litellm, span_capture) -> None:
+    """A caller outside a turn (CLI/MCP today) must not produce a stray
+    root generation span, even with tracing fully configured."""
+    fake_litellm(usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+
+    await _drain(
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m/x", stream=True)
+    )
+
+    assert span_capture.finished_spans() == []
+
+
+async def test_a_failing_model_call_still_closes_its_generation(
+    fake_litellm, span_capture, audit_events, monkeypatch
+) -> None:
+    """The turn's own error must propagate unchanged (the gateway's typed
+    `timeout`), with the generation closed rather than left open."""
+    monkeypatch.setattr(gateway, "get_settings", lambda: _settings(model_call_timeout_s=1))
+    fake_litellm(hang_s=5, hang_after_chunk=True)
+    trace = _trace()
+
+    with tracing.start_turn_trace(trace, input="hi"):
+        stream = await gateway.complete(
+            [{"role": "user", "content": "hi"}], model="m/x", stream=True, trace=trace
+        )
+        with pytest.raises(ManaLeakError) as excinfo:
+            await _drain(stream)
+
+    assert excinfo.value.code is ErrorCode.timeout
+    generation = span_capture.span_named("m/x")
+    assert generation.end_time is not None
+
+
 # --- Live (AC-1, AC-12 latency sanity; CHAT_MODEL) ---------------------------
 
 
@@ -454,3 +642,33 @@ async def test_live_streaming_completion_against_chat_model() -> None:
 
     assert text.strip()
     assert gateway.current_call_count() == 1
+
+
+@pytest.mark.live
+async def test_live_streamed_usage_reaches_the_generation(span_capture) -> None:
+    """AC-4's "token counts greater than zero" against the real provider:
+    the fake can only replay the chunk shape this asserts is real, i.e.
+    that `stream_options={"include_usage": True}` actually survives
+    LiteLLM/OpenRouter and lands on the generation span."""
+    settings = get_settings()
+    gateway.start_turn_budget()
+    trace = _trace()
+
+    with tracing.start_turn_trace(trace, input="Reply with exactly the word OK."):
+        stream = await gateway.complete(
+            [{"role": "user", "content": "Reply with exactly the word OK."}],
+            model=settings.chat_model,
+            stream=True,
+            max_tokens=20,
+            trace=trace,
+        )
+        text = "".join([chunk.delta async for chunk in stream])
+
+    generation = span_capture.span_named(settings.chat_model)
+    usage = json.loads(_attr(generation, "usage_details"))
+    assert text.strip()
+    assert _attr(generation, "output") == text
+    assert usage["input"] > 0 and usage["output"] > 0
+    # Cost is the provider's to report; recorded when present, never faked.
+    cost = _attr(generation, "cost_details")
+    assert cost is None or json.loads(cost)["total"] >= 0

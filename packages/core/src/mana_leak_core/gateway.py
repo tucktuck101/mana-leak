@@ -13,24 +13,37 @@ does not change later).
 Three things the gateway enforces on every call, independent of LiteLLM:
 
 - **Per-turn model-call budget.** `process_turn` (WP4) calls
-  `start_turn_budget()` once at turn start, in the same `asyncio` task that
-  will call `complete()` -- contextvars propagate down that task's awaits
-  but not across a spawned `Task`/thread, and M1 never calls `complete()`
-  concurrently within a turn. `complete()` reads and increments a
-  contextvar on every call, raising *before* the call that would exceed the
-  absolute cap (`Settings.model_calls_max`, default 8) and emitting a
-  `limit_reached` audit event itself (contracts.md -> Operational limits:
-  "the model gateway (`complete()`) increments it on every call and raises
+  `start_turn_budget(conversation_id=..., turn_id=...)` once at turn start,
+  in the same `asyncio` task that will call `complete()` -- contextvars
+  propagate down that task's awaits and into a `Task` spawned from it (the
+  child copies the context at creation), but a value set *after* that copy
+  is invisible to the child, and a set inside the child never reaches the
+  parent. The SSE adapter therefore drives `process_turn` from one
+  long-lived producer task (`mana_leak_api.sse.sse_stream`) instead of a
+  task per event, so every `complete()` call in a turn shares one counter.
+  `complete()` reads and increments that contextvar on every call, raising
+  *before* the call that would exceed the absolute cap
+  (`Settings.model_calls_max`, default 8) and emitting a `limit_reached`
+  audit event itself (contracts.md -> Operational limits: "the model
+  gateway (`complete()`) increments it on every call and raises
   `model_limit_exceeded` when the next call would exceed the absolute
-  cap").
+  cap"). The same call also records the turn's `conversation_id`/`turn_id`,
+  which every audit row this module writes is attributed to
+  (`docs/data-model.md` -> `audit_event`: a null `conversation_id` means a
+  CLI/MCP call with no conversation, not a turn the gateway could not name).
 - **Model-call timeout.** The M1 spike (`docs/ROADMAP.md` -> M1 spike
   results) found LiteLLM's own `timeout=` kwarg does not reliably cancel a
   hung call (a 30 s timeout did not stop a 104 s call), so the gateway
-  wraps every call -- for `stream=True`, the full chunk-by-chunk
-  consumption, not just the initial connection -- in its own
-  `asyncio.timeout(Settings.model_call_timeout_s)`, converting the
-  resulting `TimeoutError` into `ManaLeakError(ErrorCode.timeout)` and
-  emitting `limit_reached` itself (PRD AC-6; the turn orchestrator
+  bounds every call with `Settings.model_call_timeout_s` itself -- for
+  `stream=True`, the full chunk-by-chunk consumption, not just the initial
+  connection: one loop-time deadline is computed before the call and each
+  individual `await` (the connection, then every `__anext__`) runs under
+  `asyncio.timeout_at(deadline)`. The scope is never held across a `yield`,
+  because a timeout scope held open across a `yield` fires inside whichever
+  task resumed the generator (and is simply never armed in the task that is
+  actually stalled). The resulting `TimeoutError` becomes
+  `ManaLeakError(ErrorCode.timeout)` and the gateway emits
+  `limit_reached` itself (PRD AC-6; the turn orchestrator
   separately emits `limit_reached` for the 120 s overall turn deadline --
   exactly one emitter per limit).
 - **Secret redaction.** Before any outbound message is sent, the gateway
@@ -55,17 +68,6 @@ against installed `litellm` 1.103.1 and one live OpenRouter call.
 `embed()` (contracts.md's other gateway function) is not implemented here:
 no M1 surface calls it (RAG/embeddings start at M5), and the Shared
 contracts row this module implements only quotes `complete()`.
-
-Known contract gap (recorded in `.workmux/HANDOFF.md` for the orchestrator):
-`ErrorCode` (WP1, `contracts/errors.py`, already merged, outside this WP's
-ownership) does not include `model_limit_exceeded`, even though
-`docs/contracts.md` -> Error taxonomy defines it and `Settings`' own
-docstring (WP1, `settings.py`) describes the gateway raising it. The
-absolute-cap branch below therefore raises `ManaLeakError` with the literal
-string `"model_limit_exceeded"` instead of a (currently nonexistent)
-`ErrorCode` member; the wire-level value (the JSON/SSE `error.code` string)
-is identical to what `ErrorCode.model_limit_exceeded` would serialise to,
-so no downstream behaviour differs once the enum gains the member.
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from contextvars import ContextVar
 from typing import Any
+from uuid import UUID
 
 import litellm
 from pydantic import BaseModel, SecretStr
@@ -114,23 +117,47 @@ class ModelChunk(BaseModel):
 
 _call_count: ContextVar[int] = ContextVar("mana_leak_gateway_call_count", default=0)
 _call_budget: ContextVar[int | None] = ContextVar("mana_leak_gateway_call_budget", default=None)
+#: The turn every audit row written by this module is attributed to.
+_turn_ids: ContextVar[tuple[UUID, UUID] | None] = ContextVar(
+    "mana_leak_gateway_turn_ids", default=None
+)
 
 
-def start_turn_budget(max_calls: int | None = None) -> None:
-    """Reset the per-turn model-call counter and set the absolute cap that
+def start_turn_budget(
+    max_calls: int | None = None,
+    *,
+    conversation_id: UUID | None = None,
+    turn_id: UUID | None = None,
+) -> None:
+    """Reset the per-turn model-call counter, set the absolute cap that
     `complete()` enforces on every subsequent call in this `asyncio` task
-    (default `Settings.model_calls_max`, 8). `process_turn` (WP4) calls
-    this once, at the start of each turn, before making any `complete()`
-    call for that turn.
+    (default `Settings.model_calls_max`, 8), and record the turn this
+    gateway's audit rows belong to. `process_turn` (WP4) calls this once, at
+    the start of each turn, before making any `complete()` call for it; a
+    caller with no conversation (CLI/MCP) leaves the ids unset, which is the
+    documented meaning of a null `conversation_id` in `audit_event`.
     """
     _call_count.set(0)
     _call_budget.set(max_calls if max_calls is not None else get_settings().model_calls_max)
+    named = conversation_id is not None and turn_id is not None
+    _turn_ids.set((conversation_id, turn_id) if named else None)
 
 
 def current_call_count() -> int:
     """Calls made so far against the current turn's budget. Introspection
     for tests/callers; M1's single `other`-route call never needs it."""
     return _call_count.get()
+
+
+async def _audit_limit_reached(limit: str, value: int) -> None:
+    conversation_id, turn_id = _turn_ids.get() or (None, None)
+    await emit_audit_event(
+        AuditEventType.limit_reached,
+        Severity.warning,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        details={"limit": limit, "value": value},
+    )
 
 
 def _check_no_secrets(messages: Sequence[dict[str, str]], settings: Settings) -> None:
@@ -159,23 +186,25 @@ async def _reserve_call(settings: Settings) -> None:
     used = _call_count.get()
     if used >= budget:
         logger.warning("model-call budget exceeded: %s calls, cap %s", used, budget)
-        await emit_audit_event(
-            AuditEventType.limit_reached,
-            Severity.warning,
-            details={"limit": "model_calls_max", "value": budget},
-        )
+        await _audit_limit_reached("model_calls_max", budget)
         raise ManaLeakError(
-            "model_limit_exceeded",  # ErrorCode gap -- see module docstring
+            ErrorCode.model_limit_exceeded,
             f"model-call budget of {budget} calls per turn exceeded",
             details={"limit": "model_calls_max", "value": budget},
         )
     _call_count.set(used + 1)
 
 
-async def _emit_call_timeout(settings: Settings) -> None:
-    await emit_audit_event(
-        AuditEventType.limit_reached,
-        Severity.warning,
+async def _call_timeout(settings: Settings) -> ManaLeakError:
+    """Audit the limit and build the typed error for a call that ran past
+    `model_call_timeout_s`. `details` names the limit, so the SSE `error`
+    event is distinguishable from the orchestrator's turn deadline and from
+    a client disconnect (all three carry `ErrorCode.timeout`)."""
+    await _audit_limit_reached("model_call_timeout_s", settings.model_call_timeout_s)
+    return ManaLeakError(
+        ErrorCode.timeout,
+        "model call timed out",
+        retryable=True,
         details={"limit": "model_call_timeout_s", "value": settings.model_call_timeout_s},
     )
 
@@ -241,8 +270,7 @@ async def _complete_once(kwargs: dict[str, Any], settings: Settings) -> ModelRes
         async with asyncio.timeout(settings.model_call_timeout_s):
             response = await litellm.acompletion(**kwargs)
     except TimeoutError:
-        await _emit_call_timeout(settings)
-        raise ManaLeakError(ErrorCode.timeout, "model call timed out", retryable=True) from None
+        raise await _call_timeout(settings) from None
     choice = response.choices[0]
     return ModelResponse(
         text=choice.message.content or "",
@@ -252,15 +280,28 @@ async def _complete_once(kwargs: dict[str, Any], settings: Settings) -> ModelRes
 
 
 async def _stream(kwargs: dict[str, Any], settings: Settings) -> AsyncIterator[ModelChunk]:
+    """Bounds the whole call -- connection plus every chunk -- with one
+    loop-time deadline, opening a timeout scope around each single `await`
+    and never across the `yield` (see the module docstring: a scope held
+    across a `yield` is armed in whichever task resumes the generator, not
+    in the task that is stalled waiting for the next chunk)."""
+    deadline = asyncio.get_running_loop().time() + settings.model_call_timeout_s
     try:
-        async with asyncio.timeout(settings.model_call_timeout_s):
+        async with asyncio.timeout_at(deadline):
             response = await litellm.acompletion(**kwargs)
-            async for part in response:
-                choice = part.choices[0]
-                delta = choice.delta.content or ""
-                finish_reason = choice.finish_reason
-                if delta or finish_reason:
-                    yield ModelChunk(delta=delta, finish_reason=finish_reason)
     except TimeoutError:
-        await _emit_call_timeout(settings)
-        raise ManaLeakError(ErrorCode.timeout, "model call timed out", retryable=True) from None
+        raise await _call_timeout(settings) from None
+    parts = response.__aiter__()
+    while True:
+        try:
+            async with asyncio.timeout_at(deadline):
+                part = await anext(parts)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            raise await _call_timeout(settings) from None
+        choice = part.choices[0]
+        delta = choice.delta.content or ""
+        finish_reason = choice.finish_reason
+        if delta or finish_reason:
+            yield ModelChunk(delta=delta, finish_reason=finish_reason)

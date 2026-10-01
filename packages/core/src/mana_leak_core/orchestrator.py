@@ -159,16 +159,9 @@ def _validate(
 
 
 def _error_info(exc: ManaLeakError) -> ErrorInfo:
-    try:
-        code = ErrorCode(exc.code)
-    except ValueError:
-        # Codes outside M1's reachable subset (e.g. the gateway's
-        # `model_limit_exceeded`, see `contracts/errors.py`) are surfaced as
-        # `internal_error` with the original message rather than crashing
-        # `ErrorInfo` validation.
-        logger.warning("unmapped error code %r surfaced as internal_error", exc.code)
-        code = ErrorCode.internal_error
-    return ErrorInfo(code=code, message=exc.message, retryable=exc.retryable, details=exc.details)
+    return ErrorInfo(
+        code=exc.code, message=exc.message, retryable=exc.retryable, details=exc.details
+    )
 
 
 def _model_messages(context: ModelContext, settings: Settings) -> list[dict[str, str]]:
@@ -266,7 +259,10 @@ async def _run_turn(
 
     # Step 2. The budget is reset before any model call in this turn
     # (plan -> Shared contracts: `process_turn` calls it once at turn start).
-    start_turn_budget()
+    # The ids go with it so the gateway's own `limit_reached` rows (per-call
+    # timeout, model-call cap) name the turn they belong to, like this
+    # module's turn-deadline row does.
+    start_turn_budget(conversation_id=state.conversation_id, turn_id=state.turn_id)
     # Persisted before `message_start`: a failure here (unknown conversation,
     # database down) must reach the adapter as an HTTP error, not as an
     # in-stream `error` event (`contracts.md` -> Conversation behaviour).

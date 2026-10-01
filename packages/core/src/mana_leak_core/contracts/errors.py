@@ -2,11 +2,16 @@
 
 `ErrorCode` is scoped to the subset M1's surfaces can actually raise (PRD ->
 Interfaces and contracts affected): `ambiguous_match` (cards), `tool_not_allowed`
-/ `tool_limit_exceeded` (tool loop), `model_limit_exceeded` (M1's `other` route
-never nears the call budget from a single short answer),
-`structured_output_invalid` / `citation_validation_failed` / `insufficient_evidence`
-(judge/rules), and `safeguard_rejected` (model-based screening, M8) are not
-reachable yet and are added by the milestone that introduces their surface.
+/ `tool_limit_exceeded` (tool loop), `structured_output_invalid` /
+`citation_validation_failed` / `insufficient_evidence` (judge/rules), and
+`safeguard_rejected` (model-based screening, M8) are not reachable yet and are
+added by the milestone that introduces their surface.
+
+`model_limit_exceeded` *is* reachable in M1: the model gateway raises it when
+the next `complete()` call would exceed `Settings.model_calls_max`
+(`contracts.md` -> Operational limits), which an operator can trigger with
+`MODEL_CALLS_MAX=0`. M1's single `other`-route call never reaches the default
+cap of 8 on its own.
 """
 
 from enum import StrEnum
@@ -21,6 +26,7 @@ class ErrorCode(StrEnum):
     conflict = "conflict"
     dependency_unavailable = "dependency_unavailable"
     timeout = "timeout"
+    model_limit_exceeded = "model_limit_exceeded"
     internal_error = "internal_error"
 
 

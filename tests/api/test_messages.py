@@ -3,18 +3,50 @@
 (plan -> WP5 Notes: the fake generator used before WP4 merged is gone).
 `api_db` points both at the migrated `mana_leak_test` database; `fake_gateway`
 stands in for the model gateway (WP3's own contract) so turn timing/content
-is deterministic without a live network call. The end-to-end test at the
-bottom is the one exception (`@pytest.mark.live`): it also exercises the
-real gateway/`CHAT_MODEL` call.
+is deterministic without a live network call -- except where the gateway's
+own limits are what is under test, which run the real gateway over a fake
+LiteLLM. The end-to-end test at the bottom is the one exception
+(`@pytest.mark.live`): it also exercises the real gateway/`CHAT_MODEL` call.
 """
 
 import asyncio
+import json
+import uuid
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import litellm
 import pytest
+from mana_leak_api.dependencies import ProcessTurn, get_process_turn
+from mana_leak_api.main import app
+from mana_leak_core import gateway
+from mana_leak_core.contracts.enums import AuditEventType
+from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
+from mana_leak_core.contracts.events import TurnEvent
+from mana_leak_core.db.models import AuditEvent
+from mana_leak_core.settings import Settings, get_settings
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.anyio
+
+
+def _gateway_settings(**overrides: object) -> Settings:
+    """Real `Settings` with `overrides` applied, for patching the gateway's
+    own `get_settings` (its per-call limits)."""
+    base = get_settings()
+    return Settings(
+        **{**base.model_dump(), "openrouter_api_key": base.openrouter_api_key},
+    ).model_copy(update=overrides)
+
+
+def _chunk(delta: str, finish_reason: str | None = None) -> SimpleNamespace:
+    """One LiteLLM streaming chunk, as `gateway._stream` reads it."""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=delta), finish_reason=finish_reason)]
+    )
 
 
 def _parse_sse(raw: str) -> list[tuple[str, str]]:
@@ -114,6 +146,95 @@ async def test_malformed_action_value_returns_422_validation_error(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
+
+
+async def test_a_pre_stream_model_limit_exceeded_maps_to_an_error_response(
+    client: httpx.AsyncClient,
+) -> None:
+    """`model_limit_exceeded` has no row in contracts.md's HTTP error mapping
+    because the cap can only be hit after `message_start`, so a client
+    normally meets it as an in-stream `error` event. Raised before the first
+    event (a later milestone's `complete()` call outside a turn stream), the
+    handler must still answer with an `ErrorResponse` body carrying the real
+    code -- never FastAPI's default plain-text 500."""
+
+    def _override() -> ProcessTurn:
+        async def process_turn(*args: object, **kwargs: object) -> AsyncIterator[TurnEvent]:
+            raise ManaLeakError(
+                ErrorCode.model_limit_exceeded,
+                "model-call budget of 8 calls per turn exceeded",
+                details={"limit": "model_calls_max", "value": 8},
+            )
+            yield  # pragma: no cover - unreachable; makes this a generator
+
+        return process_turn
+
+    app.dependency_overrides[get_process_turn] = _override
+
+    response = await client.post(f"/conversations/{uuid4()}/messages", json={"content": "hi"})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "model_limit_exceeded",
+            "message": "model-call budget of 8 calls per turn exceeded",
+            "retryable": False,
+            "details": {"limit": "model_calls_max", "value": 8},
+        }
+    }
+
+
+async def test_a_mid_stream_stall_ends_the_turn_with_the_model_call_timeout(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    api_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-6/NFR-1 on the deployed path, through the real gateway: a stream
+    that starts promptly and then stalls must be cancelled by the gateway's
+    own `model_call_timeout_s`, not left to the 120 s turn deadline and not
+    reported as a client disconnect. This holds only because the gateway
+    bounds each chunk individually: a timeout scope held open across a
+    `yield` is armed in whichever task resumes the generator, never in the
+    one that is stalled waiting for the next chunk."""
+    monkeypatch.setattr(gateway, "get_settings", lambda: _gateway_settings(model_call_timeout_s=1))
+
+    async def acompletion(**kwargs: object) -> AsyncIterator[SimpleNamespace]:
+        async def stream() -> AsyncIterator[SimpleNamespace]:
+            yield _chunk("Mana ")
+            await asyncio.sleep(5)  # longer than `model_call_timeout_s`
+            yield _chunk("", finish_reason="stop")
+
+        return stream()
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    created = (await client.post("/conversations", json={})).json()
+
+    response = await client.post(
+        f"/conversations/{created['id']}/messages", json={"content": "hello"}
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [t for t, _ in events] == ["message_start", "text_delta", "error", "message_end"]
+    error = json.loads(dict(events)["error"])["error"]
+    assert error["code"] == "timeout"
+    assert error["message"] == "model call timed out"  # not "client disconnected"
+    assert error["details"] == {"limit": "model_call_timeout_s", "value": 1}
+
+    # The partial answer is persisted, and the limit is attributable to the turn.
+    turn_id = json.loads(events[0][1])["turn_id"]
+    rows = (
+        (await db.execute(select(AuditEvent).where(AuditEvent.turn_id == uuid.UUID(turn_id))))
+        .scalars()
+        .all()
+    )
+    assert [row.event_type for row in rows] == [AuditEventType.limit_reached.value]
+    assert str(rows[0].conversation_id) == created["id"]
+    assert rows[0].details == {"limit": "model_call_timeout_s", "value": 1}
+
+    messages = (await client.get(f"/conversations/{created['id']}")).json()["messages"]
+    assert messages[-1]["content"] == "Mana "
 
 
 # --- Live end-to-end (AC-1, AC-2; CHAT_MODEL) --------------------------------

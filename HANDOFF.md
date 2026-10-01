@@ -1,11 +1,11 @@
-Current activity: M1 — all WPs + m1-fix-web merged. Browser AC-12 still fails: first turn of a NEW chat is aborted client-side ~2 s in ("client disconnected"), next send lost, title stale. Fix lane m1-fix-web2 (omp-worker-opus) running.
+Current activity: M1 — implementation complete and verified (make test/lint/e2e + browser AC-12). Pending: §49a milestone review gate, then mark M1 Complete in ROADMAP.
 
 Done:
 - M1 PRD Approved; plan Approved after Fable single-pass review (all 16 findings applied).
 - Wave 1 dispatched 2026-10-01: m1-contracts (WP1, omp-worker-lite), m1-web (WP6, omp-worker), m1-compose (WP7, omp-worker-lite). Lane prompts in .workmux/prompts/ (git-excluded).
 
-In flight: lane m1-fix-web2. Compose stack up (localhost:3000/8000).
+In flight: nothing. Compose stack up.
 
 Waiting on user: rotate the OpenRouter key (a failing test printed it into the session transcript; fixed in f93e4b6) and update .env.
 
-Next action: when m1-fix-web2 settles, checks, merge, `docker compose up -d --build web`, redo AC-12 walkthrough (new chat, 3 turns, verify server messages have no payload.error, reload, continue), then §49a milestone gate, mark M1 Complete.
+Next action: run §49a milestone gate on M1 (reviewer per budget rules), fix findings, set ROADMAP M1 status Complete and PRD Status Complete, then start M2 PRD (Observability).

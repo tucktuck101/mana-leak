@@ -638,6 +638,13 @@ Historical record using round-2 numbering (M8 CLI + MCP, M9–M11); Round 3 belo
 
 `CHAT_MODEL=openrouter/deepseek/deepseek-v4-flash` (router and grader default to it) is the development model, chosen for cost: OpenRouter lists it at $0.042 in / $0.084 out per million tokens, against $0.016 / $0.396 for `deepseek-v4.1-flash`. Output-heavy chat makes v4-flash cheaper. Both list `tools` and `structured_outputs` support. Model quality is compared in M9 (Evaluation); this is not a final choice.
 
+M1 spike results (2026-10-01, LiteLLM 1.103.1 → OpenRouter → `deepseek-v4-flash`):
+
+- Streaming, JSON-schema structured output (`response_format` from a Pydantic model with `extra="forbid"` and `Literal` enums), and tool calling all work.
+- The model reasons by default. A routing-sized structured call took 88–105 s and ~1,600–2,000 output tokens with default or `reasoning_effort="low"`. With `extra_body={"reasoning": {"enabled": False}}` it took 8 s and 35 tokens. **The gateway disables reasoning by default**; enabling it per call is a later, deliberate choice.
+- LiteLLM's `timeout=30` did not stop a 104 s call. **The gateway enforces model timeouts itself** (`asyncio.timeout`/`wait_for` around the call), not through LiteLLM's parameter alone.
+- Time to first streamed token was ~11 s. That's fine for development, but it is the main latency cost per call; it feeds the turn-budget check in M9.
+
 ### Round 3 — M5/M6 citation boundary, Langfuse exit criterion, ChatGPT-like continuation, and CLI/MCP as a stretch milestone
 
 1. M5/M6 boundary (R3-1): M5 (Rules explanations) now owns the evidence ledger, citation resolution, citation validation (`citation_valid`), and the bounded second pass; its pre-M7 insufficiency outcome is a `RulesExplanation` with empty citations and non-empty `missing_information`, persisted in `ruling`. M6 (Structured rulings) adds the legality `Ruling` kind (`legal|illegal|conditional|insufficient_information`), ruling-specific validation, and force-ask on top of M5's shared machinery. M5 now depends on M4 for combo evidence. The eval harness's `eval_case`/`eval_run` tables move to M5's migration (the harness starts there); `audit_event` moves to M1's migration, with emission wired in from M1. Per-turn limits are enforced where they are needed, not introduced in one place: the model-call cap and turn timeout ship with the M1 gateway, the tool-call cap and truncation ship with M3's tool loop, retrieval caps ship with M5, and M8 (Safeguards) hardens and adversarially verifies all of them rather than introducing them.

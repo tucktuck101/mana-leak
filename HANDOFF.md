@@ -4,9 +4,9 @@ Done:
 - M1 PRD + plan Complete; ROADMAP M1 = Complete. Verification log in docs/prds/M1-walking-skeleton.plan.md.
 - make test (122 Python + 19 web), make lint, make e2e (incl. Playwright browser test, 11/11) pass on master.
 
-In flight: nothing. Compose stack (postgres/api/web) is running.
+In flight: Fable single-pass review of the M2 plan (agent M2PlanReview).
 
-Waiting on user: final approval of docs/prds/M2-observability.plan.md (schemas chosen; 3 Opus lanes kept). Do NOT dispatch until approved.
+Waiting on user: nothing until Fable returns; then user decides on findings + plan approval. Do NOT dispatch.
 
 Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
 

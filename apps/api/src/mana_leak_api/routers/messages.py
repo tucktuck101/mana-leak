@@ -9,11 +9,11 @@ raised there -- in M1, `conflict` from the per-conversation in-process lock
 event (contracts.md -> SSE mapping).
 """
 
-from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from mana_leak_core.contracts.enums import SessionControl
 from pydantic import BaseModel, ConfigDict
 
 from mana_leak_api.dependencies import ProcessTurn, get_process_turn
@@ -26,7 +26,7 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str | None = None
-    action: Literal["answer", "new_question", "end_session"] | None = None
+    action: SessionControl | None = None
 
 
 @router.post("/{conversation_id}/messages")

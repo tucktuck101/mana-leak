@@ -48,3 +48,14 @@ class AuditEventType(StrEnum):
     citation_validation_failed = "citation_validation_failed"
     structured_output_invalid = "structured_output_invalid"
     dependency_degraded = "dependency_degraded"
+
+
+class SessionControl(StrEnum):
+    """`docs/contracts.md` -> Core enums, Judge contracts -> Session controls.
+    `process_turn`'s `session_action` parameter; distinct from
+    `ContinuationKind` (`SessionControl.end_session` has no counterpart
+    there -- the model's own classification never ends a session)."""
+
+    answer = "answer"
+    new_question = "new_question"
+    end_session = "end_session"

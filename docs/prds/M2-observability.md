@@ -127,7 +127,7 @@ None for this milestone — the eval harness and its gates are introduced at M5/
 - If this milestone's exit criterion (a chat turn appears as a trace under its conversation's session in local self-hosted Langfuse, provisioned headlessly) is not met on the first attempt, mark M2 `Blocked`, continue to M3 with tracing disabled, and retry at Checkpoint D (`docs/ROADMAP.md` → M2 → Depends on; Decisions & deviations → Round 3 R3-2).
 - No authentication; the stack still binds to `127.0.0.1` (`docs/architecture.md` → Scope and assumptions) — the Langfuse stack is likewise local-only, no public deployment.
 - The `langfuse` Python SDK dependency is already pinned (`langfuse>=4.7,<5`, `packages/core/pyproject.toml`); this milestone uses that pinned major version, it does not change it.
-- The per-worktree test-isolation database (`mana_leak_test_<worktree>`, created on first use, dropped at session end) is development tooling, not product behaviour: it has no FR or AC of its own, is built as this milestone's first work package per the user decision recorded in Open issues, below, and is cited here only so the plan's first work package has a PRD anchor (`docs/ROADMAP.md`:654).
+- The per-worktree test-isolation schema (`test_<slug>` inside the shared `mana_leak_test` database, created on first use, dropped at session end) is development tooling, not product behaviour: it has no FR or AC of its own, is built as this milestone's first work package per the user decision recorded in Open issues, below, and is cited here only so the plan's first work package has a PRD anchor (`docs/ROADMAP.md`:654).
 
 ## 10. Risks and fallbacks
 
@@ -164,7 +164,7 @@ None for this milestone — the eval harness and its gates are introduced at M5/
 
 None. Resolved 2026-10-01:
 
-- Test isolation (user decision): each worktree's DB-backed tests use their own database (`mana_leak_test_<worktree>`), created on first use and dropped at session end, so parallel lanes can't interfere. This is development tooling, not product behaviour; the M2 plan builds it as its first work package.
+- Test isolation (user decision): each worktree's DB-backed tests use their own Postgres schema (`test_<slug>`) inside the shared `mana_leak_test` database, created on first use and dropped at session end, so parallel lanes can't interfere. This is development tooling, not product behaviour; the M2 plan builds it as its first work package.
 - Langfuse stack topology, `LANGFUSE_INIT_*` set, and SDK v4 API: verified (see Risks).
 
 ## 14. Completion condition

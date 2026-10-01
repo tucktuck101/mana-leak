@@ -4,7 +4,7 @@ PRD: [`M2-observability.md`](M2-observability.md) (Approved). This plan says **h
 
 ## Status
 
-Draft — awaiting user review. Nothing is dispatched until the user approves this plan.
+Approved (user, 2026-10-01). Wave 1 dispatched.
 
 Review: Fable single pass 2026-10-01 — 9 MAJOR / 8 MINOR / 3 NIT; all applied (F8: fail closed, user decision).
 

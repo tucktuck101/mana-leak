@@ -12,17 +12,29 @@ data: <TurnEvent JSON on one line>
 Plus a `: ping` comment every 15 s while waiting on the next event. The
 stream closes after `message_end` (the source generator's `StopAsyncIteration`).
 
-**One producer task.** `sse_stream` drives the source generator from a
-single long-lived task that feeds an `asyncio.Queue`, and does the 15 s ping
-wait on the queue -- never on the generator. A task per `__anext__()` would
-give every event its own *copy* of the context (`contextvars` are copied at
-task creation and never propagate back), so `process_turn`'s per-turn
-model-call counter would reset on every event and the gateway's model-call
-cap would be unenforceable; and any `asyncio.timeout` the core opens would
-be armed in a task that is already done by the time it should fire, so a
-stall between two chunks would never be cancelled. Both are invisible with
-M1's single short model call and silently wrong as soon as a turn makes
-several (M3's tool loop).
+**One producer task, from the very first event (M2 plan F1).** `sse_stream`
+drives the source generator (`process_turn`) from a single long-lived task
+that feeds an `asyncio.Queue`, starting with that task's own first
+`__anext__()` -- nothing else, including the caller, ever calls
+`events.__anext__()` directly. A task per `__anext__()`, or a first
+`__anext__()` pulled by the caller before the producer task exists, would
+give that event its own *copy* of the context (`contextvars` are copied at
+task creation and never propagate back): `process_turn`'s per-turn
+model-call counter would reset, the gateway's model-call cap would be
+unenforceable, and (M2) a Langfuse span opened at the top of `_run_turn`'s
+body and closed at its end would be entered in one task and exited in
+another, which OpenTelemetry logs as a context-detach error on every turn.
+Both are invisible with M1's single short model call and silently wrong as
+soon as a turn makes several (M3's tool loop) or opens a span across the
+whole turn (M2).
+
+`routers/messages.py` pulls the first *encoded* chunk itself with
+`await anext(stream)`, sourced from the same queue the producer task
+already started filling, so a `ManaLeakError` raised on `process_turn`'s
+first `__anext__()` (e.g. `conflict` from the per-conversation lock) still
+propagates out of that call -- now from inside the producer task, through
+the queue, instead of directly -- and still maps to an HTTP error rather
+than an in-stream `error` event.
 
 `sse_stream` always closes the source generator (`contextlib.aclosing`) when
 it itself is closed, cancelled, or exhausted -- normal completion, an
@@ -30,7 +42,7 @@ unhandled exception, or the ASGI server closing the response body iterator
 on client disconnect (AC-10). It first cancels the producer task, which
 throws `CancelledError` into `process_turn` at its current suspension point;
 that is how the orchestrator's per-conversation lock release and partial-text
-persistence (shared contracts -> `orchestrator.py`, WP4) get triggered.
+persistence (shared contracts -> `orchestrator.py`, WP4/WP5) get triggered.
 """
 
 import asyncio
@@ -54,10 +66,10 @@ def _encode(event: TurnEvent) -> bytes:
 
 
 async def _produce(events: AsyncIterator[TurnEvent], queue: asyncio.Queue[_Item]) -> None:
-    """Iterates the whole turn in one task (see the module docstring). The
-    queue holds at most one event, so the source generator stays suspended
-    at its `yield` until the client has taken the previous one -- the
-    backpressure a disconnect relies on."""
+    """Iterates the whole turn in one task, from its very first `__anext__()`
+    (see the module docstring). The queue holds at most one event, so the
+    source generator stays suspended at its `yield` until the client has
+    taken the previous one -- the backpressure a disconnect relies on."""
     try:
         async for event in events:
             await queue.put(event)
@@ -67,15 +79,14 @@ async def _produce(events: AsyncIterator[TurnEvent], queue: asyncio.Queue[_Item]
         await queue.put(None)
 
 
-async def sse_stream(
-    events: AsyncIterator[TurnEvent], first_event: TurnEvent
-) -> AsyncIterator[bytes]:
-    """Encodes `first_event` (already pulled from `events` by the caller, so
-    a `ManaLeakError` raised on the first `__anext__()` -- e.g. `conflict`
-    from the per-conversation lock -- maps to an HTTP error instead of an
-    in-stream `error` event) followed by the rest of `events`."""
+async def sse_stream(events: AsyncIterator[TurnEvent]) -> AsyncIterator[bytes]:
+    """Starts the one producer task first, then encodes whatever it
+    produces -- including the first event -- as SSE chunks. Raises an
+    `Exception` the source generator raised (on its first `__anext__()` or
+    any later one) instead of encoding it, in order, so the caller's own
+    `await anext(stream)` surfaces a first-event failure exactly as a
+    direct `await anext(events)` used to."""
     async with contextlib.aclosing(events):
-        yield _encode(first_event)
         queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=1)
         producer = asyncio.create_task(_produce(events, queue))
         try:
@@ -94,3 +105,14 @@ async def sse_stream(
             producer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await producer
+
+
+async def resume_stream(first_chunk: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """`StreamingResponse`'s body: the chunk `routers/messages.py` already
+    pulled from `rest` (to decide whether to raise it as an HTTP error
+    instead) re-attached as the first item, followed by the remainder of
+    the same `sse_stream` generator -- not a second one, so there is still
+    exactly one producer task per turn."""
+    yield first_chunk
+    async for chunk in rest:
+        yield chunk

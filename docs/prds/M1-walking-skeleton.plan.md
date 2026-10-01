@@ -4,7 +4,7 @@ PRD: [`M1-walking-skeleton.md`](M1-walking-skeleton.md) (Approved). This plan sa
 
 ## Status
 
-Draft — awaiting user review. Nothing is dispatched until the user approves this plan.
+Approved (user, 2026-10-01). Wave 1 dispatched.
 
 Review log: Fable single pass 2026-10-01 — 8 MAJOR / 6 MINOR / 2 NIT; all applied.
 

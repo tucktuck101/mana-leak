@@ -218,11 +218,11 @@ M2 is `Complete` only when the PRD's completion condition (§14) holds:
 | WP | Status | Merged commit | Notes |
 |---|---|---|---|
 | WP1 | Merged | eaaefcc | |
-| WP2 | In progress | — | First lane froze on `docker run` while pulling images (no commits); relaunched |
+| WP2 | Merged | dc14612 | First lane froze on `docker run` while pulling images (no commits); relaunched. The lane printed four resolved secrets into its transcript via `docker compose config` (rotated SALT and REDIS_AUTH itself); AGENTS.md §22 now forbids such commands (83aa949) |
 | WP3 | Merged | 3fdfe8b | Also edited the unowned `tests/core/test_contracts.py` (a stale M1 assertion that `LANGFUSE_PUBLIC_KEY` isn't a `Settings` field); orchestrator approved |
 | WP4 | Merged | c5c8710 | Dispatched early (depends only on WP3); exports check_no_secrets for WP5 |
 | WP5 | In progress | — | Dispatched early; merges after WP4 and WP6 and is re-tested against both |
-| WP6 | In progress | — | Dispatched early: depends only on WP3 |
+| WP6 | Merged | 4e60887 | Also edited `tests/api/test_sse.py` (unowned; tests for its own SSE change) |
 | WP7 | Not started | — | — |
 
 A verification log will be appended here as each wave lands, in the same style as `M1-walking-skeleton.plan.md`'s Progress/Verification log.

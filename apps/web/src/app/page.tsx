@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useHydrated } from "@/lib/hydrated";
 import type { ConversationSummary, ErrorResponse } from "@/lib/contracts";
 
 export default function Home() {
@@ -10,6 +11,12 @@ export default function Home() {
   const [conversations, setConversations] = useState<ConversationSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // A click on the server-rendered button before React attaches its handler
+  // is simply lost, with nothing on screen to say so (observed in headless
+  // Chromium with a slow client bundle: "New chat" did nothing and no
+  // conversation was created). Disabled until the handler exists, so the
+  // click either works or visibly cannot be made yet.
+  const hydrated = useHydrated();
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +62,7 @@ export default function Home() {
   return (
     <main style={{ padding: "4rem", fontFamily: "system-ui, sans-serif", maxWidth: 640 }}>
       <h1>Mana Leak</h1>
-      <button onClick={startConversation} disabled={creating}>
+      <button type="button" onClick={startConversation} disabled={creating || !hydrated}>
         {creating ? "Starting…" : "New chat"}
       </button>
       {error && <p style={{ color: "crimson" }}>{error}</p>}

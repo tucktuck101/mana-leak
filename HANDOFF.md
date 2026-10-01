@@ -1,4 +1,4 @@
-Current activity: M1 — Walking skeleton. PRD written (docs/prds/M1-walking-skeleton.md, Status: Proposed); PRD review gate not started.
+Current activity: M1 — Walking skeleton. PRD Approved (user). PRD plan drafted: docs/prds/M1-walking-skeleton.plan.md.
 
 Done:
 - PRD authoring standard + template (docs/prds/README.md, TEMPLATE.md).
@@ -6,6 +6,6 @@ Done:
 - LLM spike passed (results in ROADMAP → Decisions & deviations).
 
 In flight: nothing.
-Waiting on user: user is reviewing docs/prds/M1-walking-skeleton.md personally before any review gate.
+Waiting on user: review of docs/prds/M1-walking-skeleton.plan.md. Do NOT dispatch any workmux lane until the user approves it.
 
-Next action: run review gate (AGENTS.md §49a) on docs/prds/M1-walking-skeleton.md with the chosen reviewer; on pass set Status: Approved, then write docs/prds/M1-walking-skeleton.plan.md and build.
+Next action: after plan approval, run the §49a gate if the user wants one (plan → implementation), then dispatch wave 1 (WP1, WP6, WP7) per the plan.

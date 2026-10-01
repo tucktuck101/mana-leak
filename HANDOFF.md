@@ -1,4 +1,4 @@
-Current activity: M2 — Observability. PRD drafted (docs/prds/M2-observability.md, Proposed); Langfuse stack, INIT vars, SDK v4 API verified and recorded in its Risks.
+Current activity: M2 — PRD Approved (cef035f+). PRD plan drafted: docs/prds/M2-observability.plan.md (Draft).
 
 Done:
 - M1 PRD + plan Complete; ROADMAP M1 = Complete. Verification log in docs/prds/M1-walking-skeleton.plan.md.
@@ -6,8 +6,8 @@ Done:
 
 In flight: nothing. Compose stack (postgres/api/web) is running.
 
-Waiting on user: review of docs/prds/M2-observability.md (Proposed). Test-DB isolation decided (per-worktree DB, first M2 WP).
+Waiting on user: review of docs/prds/M2-observability.plan.md + its open questions (test DB vs schema, 3 Opus lanes). Do NOT dispatch until approved.
 
 Known follow-ups (not M1 scope): lanes share one mana_leak_test DB, so concurrent lane test runs interfere — give each worktree its own test DB before M2 lanes run in parallel.
 
-Next action: after user review + approval, write docs/prds/M2-observability.plan.md (do not dispatch until plan approved).
+Next action: on approval, run preflight (ALTER ROLE mana_leak CREATEDB if DB approach; docker prune for disk), dispatch wave 1 (WP1 m2-test-db, WP2 m2-compose, WP3 m2-tracing-core).

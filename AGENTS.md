@@ -1359,6 +1359,13 @@ Triage rules:
 
 The gate passes when a round returns 0 BLOCKER and 0 MAJOR. If round 5 still has BLOCKER/MAJOR findings, stop and report them to the user rather than proceeding. Each round's report and the repairs made are summarised in the commit message or the relevant PRD/plan, not in a separate memory file.
 
+Orchestration with workmux (`.workmux.yaml`):
+
+- The orchestrator dispatches PRD-plan work packages as workmux lanes using Anthropic `omp-worker*` profiles.
+- Do not use the workmux lane-review gate or its seats. Reviews follow this section (§49a) only.
+- OpenRouter is reserved for the application's own model calls; never use it for development agents or reviewers.
+- Codex profiles and reviewers are used only when the user says so.
+
 ---
 
 # 50. Git discipline

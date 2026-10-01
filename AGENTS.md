@@ -1473,6 +1473,12 @@ Next action: <one concrete step>
 
 If `HANDOFF.md` and the repository disagree, the repository wins; fix `HANDOFF.md` before continuing.
 
+Usage budget (`openusage`, JSON output, five-minute cache):
+
+- Before starting long-running work (subagent fan-out, review rounds, evals), run `openusage claude` and read `providers.*.resources.*.remaining` (percent) and `resetsAt`.
+- If the session or weekly `remaining` is below 15%, or a model-specific bucket needed for the next step (e.g. `fable` for review gates) is below 10%: update `HANDOFF.md` (record the reset time under **Waiting on user**), commit, and stop rather than starting work that will be cut off.
+- If the needed model's bucket is exhausted but others are not, a different independent reviewer model (e.g. `codex`) may substitute for a review round; note the substitution in `HANDOFF.md`.
+
 ---
 
 # 54. Do not create documentation as hidden memory

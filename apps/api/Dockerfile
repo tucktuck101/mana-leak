@@ -8,4 +8,4 @@ COPY evals/fixtures ./evals/fixtures
 RUN uv sync --frozen --no-dev --package mana-leak-api
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
-CMD ["sh", "-c", "alembic -c packages/core/alembic.ini upgrade head && uvicorn mana_leak_api.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "alembic -c packages/core/alembic.ini upgrade head && exec uvicorn mana_leak_api.main:app --host 0.0.0.0 --port 8000"]

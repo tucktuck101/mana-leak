@@ -1,11 +1,11 @@
-Current activity: Design-docs review gate (AGENTS.md §49a), round 2 repair.
+Current activity: Design-docs review gate (AGENTS.md §49a), round 3 review.
 
 Done this activity:
-- Round 1 review + repairs committed (67f41e1). Reports/decisions in ~/.omp-tmp/ (r1, r2).
-- Round 2 Fable review: 27 new findings (5 MAJOR). User decided all behavioural items; decisions in ~/.omp-tmp/r2-decisions.md (roadmap reorganised to walking skeleton first; Langfuse M2; session controls by interface; rules explanations + exact rule text).
+- Round 1 + 2 reviews and repairs committed (67f41e1, bc79756). Reports/decisions in ~/.omp-tmp/ (mana-leak-review-r1/r2.md, r1/r2-decisions.md).
+- Roadmap reorganised to walking skeleton first (M1–M11); Langfuse at M2.
 
-In flight (uncommitted): per-file repair agents on contracts.md, architecture.md, data-model.md, ROADMAP.md, vision.md, context banner, config (compose/.env.example/next.config.ts/api Dockerfile/README).
+In flight: Fable round 3 review (AdversarialDocReview3) → ~/.omp-tmp/mana-leak-review-r3.md.
 
 Waiting on user: nothing.
 
-Next action: when repairs finish, cross-check milestone renumbering across docs, `make test`, commit + push "docs: round 2 review repairs", then Fable round 3 (same criteria; max 5 rounds).
+Next action: triage round 3; ask user on product/architecture items; fan out one repair agent per file; commit; round 4 if BLOCKER/MAJOR remain (max 5). Fable bucket was 8% at round 3 start; if <5% for round 4, ask user (recommend codex as substitute reviewer).

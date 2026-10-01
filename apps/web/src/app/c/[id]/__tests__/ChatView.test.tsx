@@ -17,6 +17,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChatView } from "../ChatView";
 
@@ -409,5 +410,21 @@ describe("ChatView", () => {
     expect(screen.queryByText("Could not load this conversation.")).toBeNull();
     expect(screen.getByText(/Still answering/)).toBeTruthy();
     expect(stream.signal.aborted).toBe(false);
+  });
+
+  it("server-renders a composer that cannot submit before React takes over", () => {
+    // The browser shows this HTML, and acts on it, before the client bundle
+    // runs. If the composer were live there, a click on Send would be a plain
+    // form submission: the browser would navigate to `/c/<id>?`, dropping the
+    // typed message and any in-flight turn (the server then records the
+    // answer as `payload.error = {"code":"timeout","message":"client
+    // disconnected"}`). Verified end to end in
+    // `apps/web/e2e/first-turn.spec.ts`.
+    const html = renderToStaticMarkup(<ChatView conversationId={CONVERSATION_ID} />);
+
+    const input = /<input[^>]*>/.exec(html)?.[0] ?? "";
+    expect(input).toMatch(/\bdisabled\b/);
+    const send = /<button[^>]*>Send<\/button>/.exec(html)?.[0] ?? "";
+    expect(send).toMatch(/\bdisabled\b/);
   });
 });

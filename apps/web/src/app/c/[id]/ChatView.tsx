@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ConversationDetail, ErrorResponse, MessageOut } from "@/lib/contracts";
 import { parseEventStream } from "@/lib/sse";
+import { useHydrated } from "@/lib/hydrated";
 
 interface ChatMessage {
   id: string;
@@ -26,6 +27,13 @@ export function ChatView({ conversationId }: { conversationId: string }) {
   const [streaming, setStreaming] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // The composer is inert until React runs: before that, Send is a plain
+  // submit button in a real <form>, so a click (or Enter) navigates the
+  // browser to `/c/<id>?`, which throws away the typed message and drops an
+  // in-flight turn. Disabled controls cannot be typed into, clicked, or
+  // implicitly submitted, so that window is closed instead of being lost
+  // work. See `useHydrated`.
+  const hydrated = useHydrated();
 
   // Refs, not state, for everything the turn loop reads while it runs: a send
   // spans many awaits, and React state read from the enclosing render's
@@ -329,15 +337,19 @@ export function ChatView({ conversationId }: { conversationId: string }) {
             editable and Send keeps its place, so the next question can be
             typed during an answer and a click where Send was can never land on
             Stop and kill the turn. Stop is a separate control that exists only
-            while there is something to stop. */}
+            while there is something to stop. The only time the composer is
+            disabled is before hydration, where it cannot work at all. */}
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about a card, a combo, or a ruling…"
+          placeholder={hydrated ? "Ask about a card, a combo, or a ruling…" : "Starting up…"}
           aria-label="Message"
+          disabled={!hydrated}
           style={{ flex: 1, padding: "0.5rem" }}
         />
-        <button type="submit">Send</button>
+        <button type="submit" disabled={!hydrated}>
+          Send
+        </button>
         {streaming && (
           <button type="button" onClick={stopStreaming}>
             Stop

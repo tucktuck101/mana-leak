@@ -761,7 +761,7 @@ class HealthResponse(BaseModel):
     card_source_version: str | None
 ```
 
-`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. `langfuse` reports the model gateway's last-known Langfuse SDK state (`ok` authenticated and flushing, `disabled` no keys configured, `unavailable` last flush/auth attempt failed) — refreshed in the background, never probed synchronously inside a `/health` request, so a slow or down Langfuse cannot make `/health` block or fail. The Compose api health check calls `/health`.
+`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. `langfuse` reports the tracing module's cached state (`ok` authenticated and flushing, `disabled` no keys configured, `unavailable` last flush/auth attempt failed) — refreshed in the background, never probed synchronously inside a `/health` request, so a slow or down Langfuse cannot make `/health` block or fail. The Compose api health check calls `/health`.
 
 There is no CRUD for rule chunks, Judge sessions, rulings, eval runs, or audit events, and no conversation delete. Rulings and Judge sessions are reached only through `ConversationDetail`.
 
@@ -1005,7 +1005,7 @@ The parser turns the official TXT into `list[ParsedRuleChunk]` (chunking rules i
 ```python
 async def complete(messages, *, model: str, tools: list[ToolSpec] | None = None,
                    response_model: type[BaseModel] | None = None, stream: bool = False,
-                   max_tokens: int = 1500, trace: TraceContext) -> ModelResponse | AsyncIterator[ModelChunk]
+                   max_tokens: int = 1500, trace: TraceContext | None = None) -> ModelResponse | AsyncIterator[ModelChunk]
 async def embed(texts: list[str], *, model: str) -> list[list[float]]
 ```
 

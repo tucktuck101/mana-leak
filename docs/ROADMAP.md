@@ -659,6 +659,11 @@ M1 implementation deviations (recorded from the M1 plan):
 - In M1, `session_action="end_session"` with no message, and any `forced_route` other than `other`, return `validation_error`. No M1 caller can send either.
 - Limit settings are read from unprefixed env names matching the `Settings` field names (e.g. `MODEL_CALLS_MAX`), not the `LIMIT_*` prefix in `contracts.md` → Operational limits. `contracts.md` is corrected to match.
 
+M2 implementation deviations (recorded from the M2 plan):
+
+- The gateway's `complete()` takes `trace: TraceContext | None = None`, not a required `trace`. `/health`'s `langfuse` field reports the tracing module's cached state, not the gateway's. `contracts.md` is corrected to match.
+- The api's `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` come only from the `LANGFUSE_INIT_PROJECT_*` pair, never from the shell. The plan's fallback form `${LANGFUSE_PUBLIC_KEY:-…}` let a developer shell holding keys for an unrelated Langfuse override them (every export then got 401); found by `make e2e` on master.
+
 ### Round 3 — M5/M6 citation boundary, Langfuse exit criterion, ChatGPT-like continuation, and CLI/MCP as a stretch milestone
 
 1. M5/M6 boundary (R3-1): M5 (Rules explanations) now owns the evidence ledger, citation resolution, citation validation (`citation_valid`), and the bounded second pass; its pre-M7 insufficiency outcome is a `RulesExplanation` with empty citations and non-empty `missing_information`, persisted in `ruling`. M6 (Structured rulings) adds the legality `Ruling` kind (`legal|illegal|conditional|insufficient_information`), ruling-specific validation, and force-ask on top of M5's shared machinery. M5 now depends on M4 for combo evidence. The eval harness's `eval_case`/`eval_run` tables move to M5's migration (the harness starts there); `audit_event` moves to M1's migration, with emission wired in from M1. Per-turn limits are enforced where they are needed, not introduced in one place: the model-call cap and turn timeout ship with the M1 gateway, the tool-call cap and truncation ship with M3's tool loop, retrieval caps ship with M5, and M8 (Safeguards) hardens and adversarially verifies all of them rather than introducing them.

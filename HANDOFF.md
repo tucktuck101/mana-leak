@@ -1,9 +1,9 @@
-Current activity: M2 implementation. WP1–WP6 merged (latest 5285eb5); master make test 173 passed. WP7 m2-e2e (full-stack e2e with Langfuse) dispatched.
+Current activity: M2 — all WPs merged; make e2e passes with Langfuse (after compose key fix 6787ef5); Langfuse UI verified; doc-sync done. Pending: §49a milestone gate (Fable), then mark M2 Complete.
 
 Done: M1 Complete. M2 PRD + plan Fable-reviewed (single pass each), all findings applied; secrets fail closed (user decision); per-worktree test schemas (user decision).
 
-In flight: lane m2-e2e. It starts the Langfuse services.
+In flight: nothing. Full stack incl. Langfuse running; Langfuse UI on localhost:3001.
 
 Waiting on user: optional rotation of OPENROUTER_API_KEY (leaked twice into transcripts) and MANA_LEAK_DB_PASSWORD (leaked once).
 
-Next action: when m2-e2e settles, checks, merge, run make e2e on master, browser + Langfuse UI check (AC-9), §49a milestone gate, doc-sync step, mark M2 Complete.
+Next action: run Fable §49a milestone review of M2, fix findings, mark M2 Complete (ROADMAP + PRD + plan), then start M3 PRD (Cards).

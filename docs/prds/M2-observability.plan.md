@@ -221,8 +221,22 @@ M2 is `Complete` only when the PRD's completion condition (§14) holds:
 | WP2 | Merged | dc14612 | First lane froze on `docker run` while pulling images (no commits); relaunched. The lane printed four resolved secrets into its transcript via `docker compose config` (rotated SALT and REDIS_AUTH itself); AGENTS.md §22 now forbids such commands (83aa949) |
 | WP3 | Merged | 3fdfe8b | Also edited the unowned `tests/core/test_contracts.py` (a stale M1 assertion that `LANGFUSE_PUBLIC_KEY` isn't a `Settings` field); orchestrator approved |
 | WP4 | Merged | c5c8710 | Dispatched early (depends only on WP3); exports check_no_secrets for WP5 |
-| WP5 | Merged |  | Merged master and re-tested against real WP4/WP6 before merge; no 'Failed to detach context' in make test |
+| WP5 | Merged | 3652f54 (fast-forward) | Merged master and re-tested against the real WP4/WP6 code before merge; no "Failed to detach context" in `make test` |
 | WP6 | Merged | 4e60887 | Also edited `tests/api/test_sse.py` (unowned; tests for its own SSE change) |
-| WP7 | Not started | — | — |
+| WP7 | Merged | 50d4fa3 (fast-forward) | |
 
-A verification log will be appended here as each wave lands, in the same style as `M1-walking-skeleton.plan.md`'s Progress/Verification log.
+## Verification log
+
+- 2026-10-02: `make e2e` on master first failed AC-3: no trace arrived. The api got 401s because Compose resolved `${LANGFUSE_PUBLIC_KEY:-…}` from the orchestrator's shell, which holds keys for an unrelated Langfuse. Fixed in 6787ef5 (the api's keys come only from the `LANGFUSE_INIT_PROJECT_*` pair). The lane's own run had passed only because it unset those variables.
+- 2026-10-02: `make e2e` re-run with those shell variables still set. All checks pass:
+  - SSE ordering and history;
+  - one trace per turn, two turns under one session (AC-3);
+  - a wrong key pair raises `UnauthorizedError` against the live Langfuse (AC-10);
+  - Postgres and api restarts;
+  - mid-stream abort persisted with `payload.error`;
+  - a turn with `langfuse-web` stopped is unaffected (AC-5), and `/health` reports `langfuse=unavailable` (FR-7);
+  - the final turn's trace and its closed generation are present after `docker compose stop api` (AC-9 shutdown flush).
+- 2026-10-02: `/health` reports `langfuse: ok` with the stack up. The orchestrator logged into the Langfuse UI (headless-provisioned user, read from `.env` without printing). The login stayed on port 3001, sessions are listed per conversation, and the Tracing view shows one root trace per turn with the user's input and the model's output.
+- 2026-10-02: doc-sync step done: `contracts.md` gateway signature and `/health` wording corrected, deviations recorded in ROADMAP.
+- `make test`: 173 pytest + 19 vitest pass; `make lint` clean.
+- Pending: `AGENTS.md` §49a milestone → Complete review gate.

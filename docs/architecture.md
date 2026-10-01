@@ -151,7 +151,7 @@ flowchart LR
 | Route | Tools exposed to the model |
 |---|---|
 | `cards` | card search, card lookup |
-| `combos` | card lookup, combo find, combo search |
+| `combos` | card lookup, combo search, combo find, combo get |
 | `judge` | card lookup, rules search, combo find (only when the question concerns a known combo) |
 | `other` | none |
 

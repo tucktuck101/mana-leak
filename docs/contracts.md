@@ -377,10 +377,11 @@ class ScreeningDecision(BaseModel):
     ] | None = None
 ```
 
-Order of checks:
+Order (also fixed in Turn orchestration):
 
-1. **Deterministic pre-checks (no model call):** empty message or more than 8,000 characters → `safeguard_rejected` (`malformed`). Control characters are stripped.
-2. **Screening:** one model call (`ROUTER_MODEL`, `safeguard-v1`) returns a `ScreeningDecision`.
+1. **Deterministic validation (no model call, nothing persisted):** malformed body, empty message, or more than 8,000 characters → rejected before persistence: REST returns `ErrorResponse` (`validation_error`, status per HTTP error mapping) without opening a stream; CLI/MCP return the same error. Control characters are stripped.
+2. **Persist the user message** (valid messages only).
+3. **Screening:** one model call (`ROUTER_MODEL`, `safeguard-v1`) returns a `ScreeningDecision`.
 
 Code consequences:
 
@@ -388,7 +389,7 @@ Code consequences:
 |---|---|
 | `clear` | Continue. |
 | `uncertain` | Continue; the system prompt adds the restricted-mode notice; audit at `warning`. |
-| `suspicious` | Do not route. Reply with a fixed refusal explaining Mana Leak only answers card/combo/rules questions from evidence. Audit at `warning`. The `final` event carries an `ErrorInfo` with `safeguard_rejected`. |
+| `suspicious` | Do not route. Reply with a fixed refusal explaining Mana Leak only answers card/combo/rules questions from evidence; the refusal is persisted as the assistant message like any other answer (the user message is already persisted). Audit at `warning`. The `final` event carries an `ErrorInfo` with `safeguard_rejected`. |
 
 Screening output never includes reasoning text. Retrieved evidence is not screened by the model; it is always inserted as delimited data.
 
@@ -413,9 +414,10 @@ class ToolResult(BaseModel, Generic[T]):
     ok: bool
     data: T | None = None
     error: ToolError | None = None        # exactly one of data/error is set
+    truncated: bool = False               # True only if the model-facing text was shortened
 ```
 
-Text passed to the model is `ToolResult.model_dump_json(exclude_none=True)`. If it is over 8,000 characters, list items are dropped from the end and a `"truncated": true` key is added; long text fields (`oracle_text`, `text`, `steps`) are cut with `…` before items are dropped. Provenance is removed from model-facing text (it stays in the ledger) to save space.
+Text passed to the model is `ToolResult.model_dump_json(exclude_none=True)`. `truncated` is normally `False`. If the text is over 8,000 characters, long text fields (`oracle_text`, `text`, `steps`) are cut with `…`, then list items are dropped from the end, and `truncated` is set to `True`. Truncation affects only the representation sent to the model; the full result stays in the evidence ledger and remains authoritative for citation checks and persistence. Provenance is removed from model-facing text (it stays in the ledger) to save space.
 
 ### LLM tool table
 
@@ -468,7 +470,7 @@ async def get_active_judge_session(conversation_id: UUID) -> JudgeSessionState |
 async def build_context(conversation_id: UUID) -> ModelContext                # summary + last 10 turns + active Judge facts
 
 # orchestration
-def process_turn(conversation_id: UUID, user_message: str) -> AsyncIterator[TurnEvent]
+async def process_turn(conversation_id: UUID, user_message: str) -> AsyncIterator[TurnEvent]   # async generator
 
 # ingestion (CLI only)
 async def ingest_cards(bulk_path: Path | None = None) -> IngestReport      # downloads Oracle Cards bulk to data/ when path is None
@@ -532,11 +534,11 @@ class IngestReport(BaseModel):
 
 ## Turn orchestration
 
-`process_turn(conversation_id, user_message)` is the only conversational entrypoint. Web (via SSE), CLI `chat`, and MCP `judge` (through `judge()`) use it or its components. Sequence:
+`async def process_turn(conversation_id, user_message)` is an async generator and the only conversational entrypoint. Web (via SSE), CLI `chat`, and MCP `judge` (through `judge()`) use it or its components. Adapters run deterministic validation (step 1) before calling it, so an invalid request never opens a stream. Sequence:
 
-1. Generate `turn_id`; emit `message_start`.
-2. Run the deterministic pre-checks, then screening (Safeguards).
-3. Persist the user message.
+1. Deterministic validation (malformed, empty, > 8,000 chars). Failure → `validation_error`; nothing persisted, no stream.
+2. Generate `turn_id`; persist the user message; emit `message_start`.
+3. Model-based screening (Safeguards). `suspicious` → persist the refusal as the assistant message, then go to step 8.
 4. Build the context: summary, last 10 turns, active Judge session facts.
 5. Route. If a Judge session is active, the router sees it, and a `judge` route continues the session.
 6. Execute the route:
@@ -646,7 +648,7 @@ There is no CRUD for rule chunks, Judge sessions, rulings, eval runs, or audit e
 ### Conversation behaviour
 
 - `POST /conversations` returns the new ID; the web client stores it in the URL.
-- Sending a message persists it before any model call, then streams the turn.
+- Sending a message runs deterministic validation (failure → `validation_error` response, nothing persisted), then persists the user message before any model call (including screening), then streams the turn.
 - The final assistant message (text + `TurnResult` payload) is persisted before `final` is emitted.
 - An active Judge session continues automatically on the next message; no flag is needed.
 - After a reload, `GET /conversations/{id}` returns the full history and any active Judge session. The client renders `payload` for structured results.
@@ -693,7 +695,7 @@ class ErrorCode(StrEnum):
     structured_output_invalid   # model output failed schema after retry
     citation_validation_failed  # citations not in evidence after retry
     insufficient_evidence       # retrieval returned nothing usable
-    safeguard_rejected          # screening suspicious / malformed input
+    safeguard_rejected          # screening returned suspicious
     internal_error
 
 class ManaLeakError(Exception):

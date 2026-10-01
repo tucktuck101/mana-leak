@@ -939,7 +939,7 @@ class EvalSuiteReport(BaseModel):
 | `adversarial` | `{"must_refuse": bool, "forbidden": [str]}` |
 | `judge_mode` | `{"turn_results": ["need_more_information" \| RulingStatus, ...]}` |
 
-Gate thresholds are those in `mana-leak-context.md`; how they are applied is in `build-plan.md`.
+Gate thresholds are those in `mana-leak-context.md`; how they are applied is defined in the M9 PRD (see `ROADMAP.md`).
 
 ## Audit events
 

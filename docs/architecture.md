@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document describes how Mana Leak is shaped: its parts, their responsibilities, how requests and data move between them, where trust boundaries sit, and what runs locally. It is the bridge between `vision.md` and the implementation documents. Table fields belong in `data-model.md`; interfaces, schemas, endpoints, and commands belong in `contracts.md`; ordering and acceptance criteria belong in `build-plan.md`.
+This document describes how Mana Leak is shaped: its parts, their responsibilities, how requests and data move between them, where trust boundaries sit, and what runs locally. It is the bridge between `vision.md` and the implementation documents. Table fields belong in `data-model.md`; interfaces, schemas, endpoints, and commands belong in `contracts.md`; ordering belongs in `ROADMAP.md`, and acceptance criteria in the milestone PRDs.
 
 ## Scope and assumptions
 
@@ -454,7 +454,7 @@ Evaluation is a first-class part of the system but is separate from runtime auth
 | Adversarial/safeguard | 15 |
 | Stateful Judge mode | 10 |
 
-The harness records model, prompt, and configuration versions with every run, so results are comparable. Gates, scoring, and run cadence are defined in `build-plan.md`.
+The harness records model, prompt, and configuration versions with every run, so results are comparable. Gates, scoring, and run cadence are defined in the M9 PRD (thresholds in `mana-leak-context.md`).
 
 ## Architectural decisions
 

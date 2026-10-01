@@ -104,9 +104,9 @@ docs/contracts.md
         ↓
 docs/ROADMAP.md
         ↓
-docs/build-plan.md
+docs/prds/<milestone>-<slug>.md        (PRD: what we are building)
         ↓
-tasks/current.md
+docs/prds/<milestone>-<slug>.plan.md   (PRD plan: how we implement it)
         ↓
 existing implementation
 ```
@@ -117,9 +117,9 @@ Interpretation:
 - `architecture.md` defines system boundaries and ownership.
 - `data-model.md` defines persisted data.
 - `contracts.md` defines interfaces and schemas.
-- `ROADMAP.md` defines capability sequence.
-- `build-plan.md` defines the compressed 24-hour execution sequence.
-- `tasks/current.md` defines the current slice.
+- `ROADMAP.md` is the overall implementation plan: milestone sequence, dependencies, and status.
+- a PRD defines what one milestone (or part of one) builds: requirements and acceptance criteria.
+- a PRD plan defines how that PRD is implemented: work packages, sequence, tests, and progress. Its next incomplete step is the current slice.
 - implementation shows what currently exists.
 
 Do not silently resolve contradictions.
@@ -168,8 +168,8 @@ Never overwrite unexplained existing work.
 
 For every task:
 
-1. read `tasks/current.md`;
-2. locate the relevant roadmap/build-plan slice;
+1. identify the active PRD and PRD plan for the current roadmap milestone, and the plan's next incomplete step;
+2. read the PRD's acceptance criteria and the roadmap milestone it serves;
 3. read only the design sections relevant to the change;
 4. inspect the affected implementation;
 5. inspect nearby tests;
@@ -239,11 +239,11 @@ Classify discoveries:
 Blocks the current slice
 → fix now.
 
-Required by a later P0/P1 slice
+Required by a later PRD plan step or roadmap milestone
 → record for later.
 
 Useful but optional
-→ P2.
+→ stretch roadmap, or ignore.
 
 Unrelated
 → ignore.
@@ -1394,9 +1394,9 @@ After finishing a slice:
 1. verify it;
 2. review it;
 3. commit it;
-4. mark the appropriate build-plan work complete;
+4. mark the step complete in the PRD plan;
 5. update roadmap status when a milestone actually crosses a status boundary;
-6. replace `tasks/current.md` with the next slice.
+6. take the next incomplete PRD plan step (or the next milestone's PRD when the plan is done).
 
 Do not mark:
 
@@ -1419,8 +1419,7 @@ Therefore important decisions must live in the repo, not only in chat.
 Before relying on a prior decision, ensure it exists in:
 
 - authoritative docs;
-- build plan;
-- current task;
+- the active PRD and PRD plan;
 - decision/deviation record;
 - code/tests where appropriate.
 
@@ -1438,7 +1437,7 @@ Store only information future agents genuinely need:
 
 - settled decisions;
 - implementation deviations;
-- current task;
+- the active PRD plan step;
 - unresolved blockers;
 - verification commands.
 
@@ -1547,8 +1546,8 @@ Do not rely solely on individual feature tests.
 
 Stop adding functionality once:
 
-- P0 is complete;
-- required P1 capabilities are demonstrable;
+- roadmap milestones M1–M12 are complete;
+- every required capability is demonstrable;
 - automated checks pass;
 - required eval gates pass;
 - primary demo is reliable;
@@ -1580,7 +1579,7 @@ Every coding task follows:
 
 ```text
 ORIENT
-Read current task and relevant authoritative docs.
+Read the active PRD plan step, its PRD, and relevant authoritative docs.
 
 INSPECT
 Inspect current code, tests, dependencies, and working tree.

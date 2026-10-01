@@ -33,4 +33,4 @@ Other commands: `make dev`, `make lint`, `make format`, `make docker-down`.
 - [Architecture](docs/architecture.md)
 - [Data model](docs/data-model.md)
 - [Contracts](docs/contracts.md)
-- [Build plan](docs/build-plan.md)
+- [Roadmap](docs/ROADMAP.md)

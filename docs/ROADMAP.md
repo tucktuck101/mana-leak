@@ -4,7 +4,7 @@
 
 This roadmap sets the milestone-level delivery sequence for Mana Leak. It orders the implementation of the settled design (`vision.md`, `architecture.md`, `data-model.md`, `contracts.md`) without redesigning it.
 
-Each milestone is a PRD-sized delivery unit. PRDs add requirements and acceptance criteria; implementation plans add work packages and tasks. Neither belongs here.
+This roadmap is the overall implementation plan for Mana Leak. Each milestone is a PRD-sized delivery unit. PRDs define what is built (requirements and acceptance criteria); PRD plans define how (work packages, sequence, tests, tasks). Neither belongs here.
 
 ```text
 vision · architecture · data-model · contracts
@@ -13,9 +13,7 @@ vision · architecture · data-model · contracts
         ↓
        PRD
         ↓
-implementation plan
-        ↓
-      tasks
+    PRD plan
 ```
 
 ## Delivery strategy
@@ -651,7 +649,9 @@ risks/fallbacks
 
 A PRD must stay within its milestone's scope and the settled design documents. If it finds a design gap, the gap is reported and the relevant design document is updated deliberately, not redesigned inside the PRD.
 
-After a PRD is reviewed and approved, an implementation plan derives work packages, components, technical sequence, tests, and tasks. Coding does not start directly from a roadmap milestone.
+After a PRD is reviewed and approved, a PRD plan derives work packages, components, technical sequence, tests, and tasks, and tracks their progress. Coding does not start directly from a roadmap milestone.
+
+Location: `docs/prds/<milestone>-<slug>.md` for the PRD and `docs/prds/<milestone>-<slug>.plan.md` for its PRD plan (e.g. `docs/prds/M1-card-knowledge.md`). A split milestone uses one pair per PRD (`M4a-…`, `M4b-…`).
 
 ## Execution model
 
@@ -659,8 +659,8 @@ After a PRD is reviewed and approved, an implementation plan derives work packag
 select next roadmap milestone
 → derive PRD
 → review PRD
-→ derive implementation plan
-→ execute implementation plan
+→ derive PRD plan
+→ execute PRD plan
 → validate milestone against its success evidence
 → update roadmap status
 → select next milestone

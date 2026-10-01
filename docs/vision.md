@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document is the product north star for Mana Leak. It explains why the product exists, who it serves, what experience it must deliver, what it must not become, and how to resolve trade-offs that the detailed documents leave open. It does not specify architecture, data, interfaces, or build order; those live in `architecture.md`, `data-model.md`, `contracts.md`, and `build-plan.md`.
+This document is the product north star for Mana Leak. It explains why the product exists, who it serves, what experience it must deliver, what it must not become, and how to resolve trade-offs that the detailed documents leave open. It does not specify architecture, data, interfaces, or build order; those live in `architecture.md`, `data-model.md`, `contracts.md`, and `ROADMAP.md`.
 
 ## Product statement
 

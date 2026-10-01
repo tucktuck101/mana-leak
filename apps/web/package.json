@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:proxy": "vitest run"
+    "test:proxy": "vitest run src/app/api/__tests__/proxy.test.ts"
   },
   "dependencies": {
     "next": "16.3.8",

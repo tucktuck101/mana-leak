@@ -74,6 +74,22 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     });
   }
 
+  // The server sets `conversation.title` from the first user message
+  // (data-model.md -> conversation) but the heading is rendered from local
+  // state set on mount; refresh it from the authoritative source once the
+  // turn finishes instead of duplicating the server's title-derivation
+  // logic client-side (D2).
+  async function refreshConversationMeta() {
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`);
+      if (!res.ok) return;
+      const detail = (await res.json()) as ConversationDetail;
+      setTitle(detail.title);
+    } catch {
+      // Best effort — the next reload will still show the right title.
+    }
+  }
+
   async function sendMessage() {
     const content = input.trim();
     if (!content || streaming) return;
@@ -142,6 +158,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
             break;
           }
           case "message_end":
+            void refreshConversationMeta();
             break;
           default:
             break;

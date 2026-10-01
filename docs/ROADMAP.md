@@ -387,6 +387,8 @@ Safeguards matter most once every route exists (M7) and can be driven adversaria
 
 ### Scope
 - Input validation and safeguard screening, with code-owned consequences rather than model-decided refusals.
+- Model-based screening (`clear|suspicious|uncertain`) is introduced here; M1–M7 run only deterministic input validation and treat valid messages as `clear`.
+- Conversation summarisation of turns older than the last 10 (`conversation.summary`); before M8, context is the last 10 turns only.
 - Adversarial hardening of the per-turn execution limits already enforced since M1 (model-call cap, turn timeout) and M3 (tool-call cap): consistent structured failures instead of raw errors, verified across every route.
 - Audit coverage completed and adversarially verified: `limit_reached` (M1/M3), `dependency_degraded` (M4/M5), `citation_validation_failed` (M6), and `judge_transition` (M7) all land reliably in `audit_event`.
 - Adversarial test cases, including the critical hard-gate cases.
@@ -646,6 +648,8 @@ M1 spike results (2026-10-01, LiteLLM 1.103.1 → OpenRouter → `deepseek-v4-fl
 - The model reasons by default. A routing-sized structured call took 88–105 s and ~1,600–2,000 output tokens with default or `reasoning_effort="low"`. With `extra_body={"reasoning": {"enabled": False}}` it took 8 s and 35 tokens. **The gateway disables reasoning by default**; enabling it per call is a later, deliberate choice.
 - LiteLLM's `timeout=30` did not stop a 104 s call. **The gateway enforces model timeouts itself** (`asyncio.timeout`/`wait_for` around the call), not through LiteLLM's parameter alone.
 - Time to first streamed token was ~11 s. That's fine for development, but it is the main latency cost per call; it feeds the turn-budget check in M9.
+
+M1 PRD decisions (user, 2026-10-01): M1 runs deterministic input validation only, and model screening arrives in M8. Summarisation is deferred to M8, so M1–M7 send the last 10 turns.
 
 ### Round 3 — M5/M6 citation boundary, Langfuse exit criterion, ChatGPT-like continuation, and CLI/MCP as a stretch milestone
 

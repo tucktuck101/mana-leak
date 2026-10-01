@@ -22,8 +22,8 @@ from mana_leak_core import db as db_module
 from mana_leak_core.audit import emit_audit_event
 from mana_leak_core.contracts.enums import AuditEventType, Severity
 from mana_leak_core.db.models import AuditEvent, Conversation, Message
-from sqlalchemy import select
-from sqlalchemy.engine import make_url
+from mana_leak_core.settings import get_settings
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 pytestmark = pytest.mark.anyio
@@ -212,16 +212,13 @@ async def test_conversation_delete_cascades_to_message_and_audit_event(db) -> No
 
 @pytest.fixture
 async def _session_against_test_db(monkeypatch: pytest.MonkeyPatch, _migrated_test_db: str | None):
-    """Point `get_session()`'s process-wide engine at `mana_leak_test`, the
-    same database the `db` fixture uses, then restore it afterward."""
+    """Point `get_session()`'s process-wide engine at the worktree's own
+    schema inside `mana_leak_test`, the same URL the `db` fixture uses, then
+    restore it afterward."""
     if _migrated_test_db is None:
         pytest.skip("mana_leak_test database is unreachable")
 
-    from mana_leak_core.settings import get_settings
-
-    raw_url = get_settings().database_url.get_secret_value()
-    test_url = make_url(raw_url).set(database="mana_leak_test")
-    monkeypatch.setenv("DATABASE_URL", test_url.render_as_string(hide_password=False))
+    monkeypatch.setenv("DATABASE_URL", _migrated_test_db)
     get_settings.cache_clear()
     db_module.get_engine.cache_clear()
     db_module.session._session_factory.cache_clear()
@@ -247,6 +244,38 @@ async def test_get_session_yields_a_working_session_against_configured_database(
 def test_get_engine_enables_pool_pre_ping() -> None:
     engine = db_module.get_engine()
     assert engine.pool._pre_ping is True
+
+
+# --- per-worktree schema isolation (WP1) -----------------------------------------
+
+
+async def test_db_fixture_is_migrated_into_a_per_worktree_schema_not_public(db) -> None:
+    """The real proof the per-worktree schema is populated and used (not
+    just named correctly): `pg_tables` lists the migrated application
+    tables inside the worktree's own schema, and the `db` fixture's session
+    actually sees them through that search path, not a `relation does not
+    exist` error against an empty `public`."""
+    schema = (await db.execute(select(func.current_schema()))).scalar_one()
+    assert schema != "public"
+
+    tables = (
+        (
+            await db.execute(
+                text("select tablename from pg_tables where schemaname = :schema"),
+                {"schema": schema},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for expected in ("conversation", "message", "audit_event", "alembic_version"):
+        assert expected in tables
+
+    convo = Conversation(title="schema isolation probe")
+    db.add(convo)
+    await db.commit()
+    count = (await db.execute(select(func.count()).select_from(Conversation))).scalar_one()
+    assert count == 1
 
 
 # --- emit_audit_event -----------------------------------------------------------

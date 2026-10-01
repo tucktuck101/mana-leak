@@ -42,6 +42,14 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      # No curl in the slim base image; urllib raises on a non-2xx/timeout,
+      # which exits non-zero.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   web:
     build:
@@ -51,12 +59,17 @@ services:
       # the API. Never exposed to the browser (no NEXT_PUBLIC_ prefix).
       API_BASE_URL: http://api:8000
     depends_on:
-      # No api healthcheck exists yet (the /health route is added in M1);
-      # wait only for the api process to start, not for it to report healthy.
       api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
+    healthcheck:
+      # node:22-alpine is Alpine-based, so busybox wget is always present.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   # Langfuse stack (M2): self-hosted Langfuse (langfuse-web, langfuse-worker,
   # clickhouse, redis/valkey, minio) following the current official Langfuse

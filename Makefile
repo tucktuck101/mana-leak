@@ -1,4 +1,4 @@
-.PHONY: setup dev test lint format docker-up docker-down
+.PHONY: setup dev test lint format docker-up docker-down e2e
 
 setup: ## Install Python and web dependencies
 	uv sync
@@ -10,8 +10,13 @@ dev: ## Run API (port 8000) and web (port 3000) locally
 	  cd apps/web && npm run dev & \
 	  wait)
 
-test:
-	uv run pytest
+test: ## Run pytest; live tests included only when OPENROUTER_API_KEY is set (shell env or .env)
+	@OPENROUTER_API_KEY="$${OPENROUTER_API_KEY:-$$(grep -m1 '^OPENROUTER_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}"; \
+	if [ -n "$$OPENROUTER_API_KEY" ]; then \
+	  OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" uv run pytest; \
+	else \
+	  uv run pytest -m 'not live'; \
+	fi
 
 lint:
 	uv run ruff check .
@@ -27,3 +32,5 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+e2e: ; tests/e2e/run.sh

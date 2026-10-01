@@ -575,9 +575,11 @@ async def list_conversations(limit: int = 50) -> list[ConversationSummary]
 async def get_conversation(conversation_id: UUID) -> ConversationDetail        # not_found
 async def append_message(conversation_id: UUID, turn_id: UUID, role: MessageRole,
                          content: str, payload: dict | None = None,
-                         route: Route | None = None) -> MessageOut
+                         route: Route | None = None, *,
+                         message_id: UUID | None = None) -> MessageOut   # message_id: pre-allocated id announced by message_start
 async def get_active_judge_session(conversation_id: UUID) -> JudgeSessionState | None
 async def build_context(conversation_id: UUID) -> ModelContext                # summary + last 10 turns + active Judge facts
+# ModelContext(conversation_id: UUID, summary: str | None, messages: list[MessageOut], judge_facts added in M7)
 
 # orchestration
 async def process_turn(conversation_id: UUID, user_message: str | None = None, forced_route: Route | None = None,

@@ -167,8 +167,8 @@ M1 is `Complete` only when the PRD's completion condition holds:
 | WP1 | Merged | b2ff27d | Follow-up f93e4b6: Settings secrets as SecretStr, hermetic Settings tests (a failing test had printed the real API key) |
 | WP2 | Merged | 0b75338 | Also fixed tests/conftest.py password masking (DB tests had silently skipped) |
 | WP3 | Merged | 3f90ca7 | Merged before WP2 after a transient pre-merge failure; re-tested on master with the real audit.py (54 passed) |
-| WP4 | Not started | | |
-| WP5 | Not started | | |
+| WP4 | Merged | b4b81e0 | append_message gained keyword-only message_id; ModelContext shape defined (contracts updated); end_session without message and non-other forced_route are validation_error in M1 |
+| WP5 | Merged | 69a1cd3 | Re-test against real process_turn + real concurrent-POST test in lane m1-api-real |
 | WP6 | Merged | 4fc8b92 | |
 | WP7 | Merged | b0a259b | Lane filled local-dev DB passwords in the shared .env (gitignored) |
-| WP8 | Not started | | |
+| WP8 | In progress | | Lane m1-e2e; gateway audit await fix in lane m1-fix-audit |

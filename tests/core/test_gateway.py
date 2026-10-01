@@ -488,7 +488,9 @@ async def test_streaming_asks_the_provider_for_usage(fake_litellm) -> None:
     populates `.usage` on a streamed chunk, so FR-5's token counts would
     not exist at all. Non-streaming calls carry usage already."""
     fake = fake_litellm()
-    await _drain(await gateway.complete([{"role": "user", "content": "hi"}], model="m", stream=True))
+    await _drain(
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m", stream=True)
+    )
     await gateway.complete([{"role": "user", "content": "hi"}], model="m")
 
     assert fake.calls[0]["stream_options"] == {"include_usage": True}

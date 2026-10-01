@@ -10,13 +10,14 @@ dev: ## Run API (port 8000) and web (port 3000) locally
 	  cd apps/web && npm run dev & \
 	  wait)
 
-test: ## Run pytest; live tests included only when OPENROUTER_API_KEY is set (shell env or .env)
+test: ## Run pytest and web vitest; live pytest tests included only when OPENROUTER_API_KEY is set (shell env or .env)
 	@OPENROUTER_API_KEY="$${OPENROUTER_API_KEY:-$$(grep -m1 '^OPENROUTER_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}"; \
 	if [ -n "$$OPENROUTER_API_KEY" ]; then \
 	  OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" uv run pytest; \
 	else \
 	  uv run pytest -m 'not live'; \
 	fi
+	npm --prefix apps/web run test
 
 lint:
 	uv run ruff check .

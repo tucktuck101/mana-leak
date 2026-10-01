@@ -1,136 +1,112 @@
 """`POST/GET /conversations`, `GET /conversations/{id}` (`docs/contracts.md`
--> REST API). Uses a small fake conversation service, injected through
-FastAPI dependency overrides (plan -> WP5 Notes) -- `mana_leak_core.conversations`
-doesn't exist until WP4 merges.
-"""
+-> REST API) against the real `mana_leak_core.conversations` service (plan
+-> WP5 Notes: the fake conversation service used before WP4 merged is gone).
+`api_db` points it at the migrated `mana_leak_test` database."""
 
-from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
-from mana_leak_api.dependencies import (
-    get_create_conversation,
-    get_get_conversation,
-    get_list_conversations,
-)
-from mana_leak_api.main import app
-from mana_leak_core.contracts.conversations import ConversationDetail, ConversationSummary
-from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
 
 pytestmark = pytest.mark.anyio
 
 
-def _summary(conversation_id: UUID, title: str | None = None) -> ConversationSummary:
-    now = datetime.now(UTC)
-    return ConversationSummary(id=conversation_id, title=title, created_at=now, updated_at=now)
-
-
-async def test_create_conversation_returns_201_summary(client: httpx.AsyncClient) -> None:
-    created_id = uuid4()
-
-    async def fake_create_conversation(title: str | None = None) -> ConversationSummary:
-        assert title == "my deck"
-        return _summary(created_id, title=title)
-
-    app.dependency_overrides[get_create_conversation] = lambda: fake_create_conversation
-
+async def test_create_conversation_returns_201_and_persists(
+    client: httpx.AsyncClient, api_db: None
+) -> None:
     response = await client.post("/conversations", json={"title": "my deck"})
 
     assert response.status_code == 201
     body = response.json()
-    assert body["id"] == str(created_id)
     assert body["title"] == "my deck"
+
+    detail = await client.get(f"/conversations/{body['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["title"] == "my deck"
+    assert detail.json()["messages"] == []
 
 
 async def test_create_conversation_without_title_defaults_to_none(
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient, api_db: None
 ) -> None:
-    async def fake_create_conversation(title: str | None = None) -> ConversationSummary:
-        assert title is None
-        return _summary(uuid4(), title=None)
-
-    app.dependency_overrides[get_create_conversation] = lambda: fake_create_conversation
-
     response = await client.post("/conversations", json={})
 
     assert response.status_code == 201
     assert response.json()["title"] is None
 
 
-async def test_list_conversations_default_limit_is_50(client: httpx.AsyncClient) -> None:
-    seen_limits: list[int] = []
+async def test_list_conversations_orders_by_updated_at_descending(
+    client: httpx.AsyncClient, api_db: None, fake_gateway
+) -> None:
+    fake_gateway(deltas=("ok",))
+    first = (await client.post("/conversations", json={"title": "first"})).json()
+    second = (await client.post("/conversations", json={"title": "second"})).json()
 
-    async def fake_list_conversations(limit: int = 50) -> list[ConversationSummary]:
-        seen_limits.append(limit)
-        return [_summary(uuid4()), _summary(uuid4())]
-
-    app.dependency_overrides[get_list_conversations] = lambda: fake_list_conversations
+    # Bumping `first`'s `updated_at` with a new message (`append_message`)
+    # moves it back to the front of the list (contracts.md -> REST API:
+    # `GET /conversations` -> "by `updated_at` desc").
+    message_response = await client.post(
+        f"/conversations/{first['id']}/messages", json={"content": "hello"}
+    )
+    assert message_response.status_code == 200
 
     response = await client.get("/conversations")
 
     assert response.status_code == 200
-    assert seen_limits == [50]
+    ids = [row["id"] for row in response.json()]
+    assert ids.index(first["id"]) < ids.index(second["id"])
+
+
+async def test_list_conversations_limit_truncates_results(
+    client: httpx.AsyncClient, api_db: None
+) -> None:
+    for index in range(3):
+        await client.post("/conversations", json={"title": f"conv {index}"})
+
+    response = await client.get("/conversations", params={"limit": 2})
+
+    assert response.status_code == 200
     assert len(response.json()) == 2
 
 
-async def test_list_conversations_passes_through_explicit_limit(client: httpx.AsyncClient) -> None:
-    seen_limits: list[int] = []
+async def test_get_conversation_returns_detail_with_persisted_messages(
+    client: httpx.AsyncClient, api_db: None, fake_gateway
+) -> None:
+    fake_gateway(deltas=("hi there",))
+    created = (await client.post("/conversations", json={})).json()
 
-    async def fake_list_conversations(limit: int = 50) -> list[ConversationSummary]:
-        seen_limits.append(limit)
-        return []
+    message_response = await client.post(
+        f"/conversations/{created['id']}/messages", json={"content": "hello"}
+    )
+    assert message_response.status_code == 200
 
-    app.dependency_overrides[get_list_conversations] = lambda: fake_list_conversations
-
-    response = await client.get("/conversations", params={"limit": 5})
-
-    assert response.status_code == 200
-    assert seen_limits == [5]
-
-
-async def test_get_conversation_returns_detail(client: httpx.AsyncClient) -> None:
-    conversation_id = uuid4()
-
-    async def fake_get_conversation(conv_id: UUID) -> ConversationDetail:
-        assert conv_id == conversation_id
-        summary = _summary(conversation_id, title="t")
-        return ConversationDetail(**summary.model_dump(), messages=[])
-
-    app.dependency_overrides[get_get_conversation] = lambda: fake_get_conversation
-
-    response = await client.get(f"/conversations/{conversation_id}")
+    response = await client.get(f"/conversations/{created['id']}")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["id"] == str(conversation_id)
-    assert body["messages"] == []
+    assert body["title"] == "hello"  # `conversation.title` from the first user message
+    messages = body["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert [m["seq"] for m in messages] == [1, 2]
+    assert messages[0]["content"] == "hello"
+    assert messages[1]["content"] == "hi there"
+    assert messages[1]["route"] == "other"
 
 
-async def test_get_unknown_conversation_returns_404_not_found(client: httpx.AsyncClient) -> None:
-    async def fake_get_conversation(conv_id: UUID) -> ConversationDetail:
-        raise ManaLeakError(ErrorCode.not_found, "conversation not found")
-
-    app.dependency_overrides[get_get_conversation] = lambda: fake_get_conversation
-
+async def test_get_unknown_conversation_returns_404_not_found(
+    client: httpx.AsyncClient, api_db: None
+) -> None:
     response = await client.get(f"/conversations/{uuid4()}")
 
     assert response.status_code == 404
-    body = response.json()
-    assert body["error"]["code"] == "not_found"
+    assert response.json()["error"]["code"] == "not_found"
 
 
 async def test_get_conversation_with_malformed_id_returns_422_validation_error(
     client: httpx.AsyncClient,
 ) -> None:
-    # FastAPI resolves this route's `Depends()` alongside path-parameter
-    # parsing, before raising the validation error, so it must be overridden
-    # even though a malformed UUID never reaches the handler body.
-    async def unreachable_get_conversation(conv_id: UUID) -> ConversationDetail:
-        raise AssertionError("should not be called: UUID parsing fails first")
-
-    app.dependency_overrides[get_get_conversation] = lambda: unreachable_get_conversation
-
+    # FastAPI/Pydantic rejects the malformed UUID path parameter before the
+    # route handler runs -- no database involved.
     response = await client.get("/conversations/not-a-uuid")
 
     assert response.status_code == 422

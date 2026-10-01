@@ -2,7 +2,7 @@ Current activity: M2 — all WPs merged; make e2e passes with Langfuse (after co
 
 Done: M1 Complete. M2 PRD + plan Fable-reviewed (single pass each), all findings applied; secrets fail closed (user decision); per-worktree test schemas (user decision).
 
-In flight: nothing. Full stack incl. Langfuse running; Langfuse UI on localhost:3001.
+In flight: Fable §49a milestone review of M2 (agent M2MilestoneReview). Full stack running.
 
 Waiting on user: optional rotation of OPENROUTER_API_KEY (leaked twice into transcripts) and MANA_LEAK_DB_PASSWORD (leaked once).
 

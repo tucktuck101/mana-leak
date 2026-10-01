@@ -48,7 +48,13 @@ from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 from mana_leak_core.audit import emit_audit_event
-from mana_leak_core.contracts.enums import AuditEventType, MessageRole, Route, Severity
+from mana_leak_core.contracts.enums import (
+    AuditEventType,
+    MessageRole,
+    Route,
+    SessionControl,
+    Severity,
+)
 from mana_leak_core.contracts.errors import ErrorCode, ErrorInfo, ManaLeakError
 from mana_leak_core.contracts.events import (
     ErrorEvent,
@@ -69,7 +75,7 @@ logger = logging.getLogger(__name__)
 #: sessions, so a session control is always "ignored, as if absent"
 #: (`contracts.md` -> Turn orchestration step 5) -- parsed and accepted, never
 #: rejected as unknown (plan -> WP4 checklist).
-SESSION_ACTIONS = ("answer", "new_question", "end_session")
+SESSION_ACTIONS = tuple(c.value for c in SessionControl)
 
 #: `contracts.md` -> Turn orchestration step 6: the `other` route is "a single
 #: short model answer steering the user back to cards/combos/rules questions,
@@ -124,7 +130,7 @@ class _TurnState:
 def _validate(
     user_message: str | None,
     forced_route: Route | None,
-    session_action: str | None,
+    session_action: SessionControl | str | None,
     settings: Settings,
 ) -> str:
     """Step 1, deterministic validation. Failure -> `validation_error`,
@@ -225,7 +231,7 @@ async def process_turn(
     conversation_id: UUID,
     user_message: str | None = None,
     forced_route: Route | None = None,
-    session_action: str | None = None,
+    session_action: SessionControl | str | None = None,
 ) -> AsyncIterator[TurnEvent]:
     """`docs/contracts.md` -> Turn orchestration. Async generator; see the
     module docstring for the conflict, deadline, and cancellation contracts

@@ -41,3 +41,6 @@ data/*
 *.sqlite
 *.sqlite3
 *.log
+
+# Local decision log while the user is away (stand-in decisions by a Fable agent)
+afk-decisions.md

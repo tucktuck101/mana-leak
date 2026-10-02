@@ -36,13 +36,23 @@ propagates out of that call -- now from inside the producer task, through
 the queue, instead of directly -- and still maps to an HTTP error rather
 than an in-stream `error` event.
 
-`sse_stream` always closes the source generator (`contextlib.aclosing`) when
-it itself is closed, cancelled, or exhausted -- normal completion, an
-unhandled exception, or the ASGI server closing the response body iterator
-on client disconnect (AC-10). It first cancels the producer task, which
-throws `CancelledError` into `process_turn` at its current suspension point;
-that is how the orchestrator's per-conversation lock release and partial-text
-persistence (shared contracts -> `orchestrator.py`, WP4/WP5) get triggered.
+The source generator is always closed, and always **by the producer task**
+(`_produce` owns the `contextlib.aclosing`), whether the stream completes,
+fails, or is abandoned -- including when the ASGI server drops the response
+body iterator on a client disconnect (AC-10). `sse_stream`'s `finally`
+cancels the producer first, which throws `CancelledError` into
+`process_turn` at its current suspension point; that is how the
+orchestrator's per-conversation lock release and partial-text persistence
+(shared contracts -> `orchestrator.py`, WP4/WP5) get triggered. If the
+producer was parked at `queue.put` (the common disconnect case: the client
+stopped reading, so the queue is full) that cancellation lands in the
+producer, *not* in the suspended generator, so the generator still has to
+be closed explicitly -- and closing it from any other task would run
+`_run_turn`'s `with start_turn_trace(...)` exit in a task that never
+entered it, which OpenTelemetry logs as `Failed to detach context` once per
+aborted turn (AC-4). Hence the `aclosing` lives inside `_produce`;
+`sse_stream` keeps an outer one as a no-op fallback for the case where the
+producer task never started.
 """
 
 import asyncio
@@ -67,12 +77,15 @@ def _encode(event: TurnEvent) -> bytes:
 
 async def _produce(events: AsyncIterator[TurnEvent], queue: asyncio.Queue[_Item]) -> None:
     """Iterates the whole turn in one task, from its very first `__anext__()`
-    (see the module docstring). The queue holds at most one event, so the
-    source generator stays suspended at its `yield` until the client has
-    taken the previous one -- the backpressure a disconnect relies on."""
+    to its `aclose()` (see the module docstring). The queue holds at most one
+    event, so the source generator stays suspended at its `yield` until the
+    client has taken the previous one -- the backpressure a disconnect relies
+    on -- and a cancellation that lands here rather than inside the generator
+    (parked at `queue.put`) still finalises the generator in this task."""
     try:
-        async for event in events:
-            await queue.put(event)
+        async with contextlib.aclosing(events):
+            async for event in events:
+                await queue.put(event)
     except Exception as exc:  # re-raised on the consumer side, in order
         await queue.put(exc)
     else:
@@ -86,6 +99,9 @@ async def sse_stream(events: AsyncIterator[TurnEvent]) -> AsyncIterator[bytes]:
     any later one) instead of encoding it, in order, so the caller's own
     `await anext(stream)` surfaces a first-event failure exactly as a
     direct `await anext(events)` used to."""
+    # Fallback only: `_produce` owns closing `events` (module docstring), and
+    # a second `aclose()` on an already-closed generator does nothing. This
+    # covers the one case the producer cannot -- never having started.
     async with contextlib.aclosing(events):
         queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=1)
         producer = asyncio.create_task(_produce(events, queue))

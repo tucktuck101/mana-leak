@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -119,15 +120,35 @@ _NOOP: Observation = _NoOpObservation()
 _health: Health | None = None
 
 
+#: Deployment identity on every span (M2-14). The only supported deployment
+#: is the local Docker Compose stack (`docs/architecture.md`), so the name
+#: is a constant; `release` is the `APP_VERSION` git SHA the provenance
+#: table (`docs/contracts.md` -> Provenance -> Application) already defines,
+#: or `None` when it is unset.
+_ENVIRONMENT = "local"
+
+
 @lru_cache
 def _get_client() -> Langfuse | None:
     """The one memoized client (same `@lru_cache` pattern as
     `get_settings()`; tests that change Langfuse settings clear both).
 
-    `None` means tracing is disabled -- either key unset (FR-3). `base_url`
-    is always passed explicitly from `Settings.langfuse_host`, so the SDK's
-    own environment lookup and its `https://cloud.langfuse.com` default are
-    never reached (AC-11): Langfuse here is self-hosted, permanently.
+    `None` means tracing is disabled -- either key unset (FR-3) -- or that
+    construction failed, which `refresh_health()` reports as `unavailable`
+    rather than `disabled` (contracts.md -> `HealthResponse`: `disabled`
+    means "no keys configured"). Either way every tracing call is a no-op.
+
+    Every option whose SDK default comes from a `LANGFUSE_*` environment
+    variable and that would change *behaviour* is passed explicitly, so a
+    stray shell variable on a host run cannot silently alter tracing
+    (FR-3): `base_url` (never the `https://cloud.langfuse.com` default --
+    AC-11, Langfuse here is self-hosted permanently), `sample_rate` (1.0 --
+    every turn is traced; `LANGFUSE_SAMPLE_RATE` is read only when this is
+    `None`), and the `environment`/`release` identity above. `tracing_enabled`
+    is passed for the same reason, with one SDK caveat worth knowing:
+    `langfuse 4.16.0` ANDs it with `LANGFUSE_TRACING_ENABLED`, so that one
+    variable can still switch tracing off -- an explicit operator opt-out,
+    and `/health` keeps reporting `ok` because `auth_check()` is unaffected.
     """
     settings = get_settings()
     if not settings.langfuse_public_key or not settings.langfuse_secret_key:
@@ -137,6 +158,10 @@ def _get_client() -> Langfuse | None:
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key.get_secret_value(),
             base_url=settings.langfuse_host,
+            tracing_enabled=True,
+            sample_rate=1.0,
+            environment=_ENVIRONMENT,
+            release=os.environ.get("APP_VERSION") or None,
         )
     except Exception:
         logger.warning("langfuse: client construction failed; tracing is disabled", exc_info=True)
@@ -250,6 +275,14 @@ def record_generation(
         _close(stack, None)
 
 
+def _keys_configured() -> bool:
+    """Whether both Langfuse keys are set -- the one thing that separates
+    `disabled` from `unavailable` (`docs/contracts.md` -> `HealthResponse`:
+    `disabled` means "no keys configured")."""
+    settings = get_settings()
+    return bool(settings.langfuse_public_key and settings.langfuse_secret_key)
+
+
 async def refresh_health() -> None:
     """One `auth_check()` attempt, off the event loop; never raises (FR-7).
 
@@ -257,11 +290,15 @@ async def refresh_health() -> None:
     re-raises on an auth failure but returns `False` on at least one
     internal failure mode, and a non-`True` result must never be read as
     `ok` (AC-7, AC-10).
+
+    No client with keys configured means `Langfuse(...)` itself failed to
+    construct (`_get_client` logged why): that is `unavailable`, not
+    `disabled`, so an operator is not sent looking for a missing variable.
     """
     global _health
     client = _get_client()
     if client is None:
-        _health = "disabled"
+        _health = "unavailable" if _keys_configured() else "disabled"
         return
     try:
         authenticated = await asyncio.to_thread(client.auth_check)
@@ -283,10 +320,7 @@ def current_health() -> Health:
     """
     if _health is not None:
         return _health
-    settings = get_settings()
-    if not settings.langfuse_public_key or not settings.langfuse_secret_key:
-        return "disabled"
-    return "unavailable"
+    return "unavailable" if _keys_configured() else "disabled"
 
 
 async def health_refresh_loop(interval_s: float = 30.0) -> None:

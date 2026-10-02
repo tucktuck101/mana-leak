@@ -468,6 +468,32 @@ async def test_check_no_secrets_is_callable_directly_by_other_core_modules() -> 
     assert secret not in str(excinfo.value)
 
 
+async def test_a_secret_inside_non_string_content_is_still_blocked() -> None:
+    """M2-12: the chat protocol allows `content` to be a list of blocks
+    (multimodal, tool results -- M3). Substring-matching such a value
+    directly degrades into list membership, which no secret would ever
+    satisfy: the check would silently fail *open* on exactly the payload
+    shape most likely to carry one."""
+    settings = get_settings()
+    secret = settings.openrouter_api_key.get_secret_value()
+
+    for content in (
+        [{"type": "text", "text": f"key: {secret}"}],
+        {"text": f"key: {secret}"},
+        [secret],
+    ):
+        with pytest.raises(ManaLeakError) as excinfo:
+            gateway.check_no_secrets([{"role": "user", "content": content}], settings)
+        assert excinfo.value.code is ErrorCode.internal_error
+        assert secret not in str(excinfo.value)
+
+    # A non-string content without a secret still passes, and `None` (a
+    # tool-call message's shape) is not an error.
+    blocks = [{"type": "text", "text": "hi"}]
+    gateway.check_no_secrets([{"role": "user", "content": blocks}], settings)
+    gateway.check_no_secrets([{"role": "assistant", "content": None}], settings)
+
+
 # --- Generation observations (M2 FR-4, FR-5, AC-4) ---------------------------
 
 

@@ -6,4 +6,4 @@ In flight: 2 fix lanes.
 
 Waiting on user: nothing (user approved the fixes and the `docker compose down -v` fresh-boot check).
 
-Next action: merge fix lanes; then M2-01: `docker compose down -v` + `up --build -d` (all 8 healthy) and `down` + `up -d postgres api web` (healthy without Langfuse), record both, re-run make e2e, mark M2 Complete.
+Next action: merge fix lanes; M2-01 boot checks (down -v + up --build; postgres/api/web only); re-run make e2e; then Fable milestone review ROUND 2 (user request). If round 2 finds anything: fix it, then WAIT for the user before marking M2 Complete. If clean: mark M2 Complete.

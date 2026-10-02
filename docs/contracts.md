@@ -761,7 +761,7 @@ class HealthResponse(BaseModel):
     card_source_version: str | None
 ```
 
-`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. `langfuse` reports the tracing module's cached state (`ok` authenticated and flushing, `disabled` no keys configured, `unavailable` last flush/auth attempt failed) — refreshed in the background, never probed synchronously inside a `/health` request, so a slow or down Langfuse cannot make `/health` block or fail. The Compose api health check calls `/health`.
+`/health` returns 200 when `database` is `ok` (Langfuse state is informational) and 503 with the same body when the database is unavailable. It does not use `ErrorResponse`. `langfuse` reports the tracing module's cached state (`ok` = the last auth check succeeded, `disabled` = no keys configured, `unavailable` = the last auth check failed or raised) — this is an auth-only signal: ingestion failures downstream of a successful auth check (e.g. the worker or ClickHouse down while `langfuse-web` still answers) are not detected and still report `ok` — refreshed in the background, never probed synchronously inside a `/health` request, so a slow or down Langfuse cannot make `/health` block or fail. The Compose api health check calls `/health`.
 
 There is no CRUD for rule chunks, Judge sessions, rulings, eval runs, or audit events, and no conversation delete. Rulings and Judge sessions are reached only through `ConversationDetail`.
 

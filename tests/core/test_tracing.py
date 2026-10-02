@@ -159,12 +159,16 @@ async def test_record_generation_without_a_turn_trace_is_a_no_op(
     assert span_capture.finished_spans() == []
 
 
-# --- Self-hosted endpoint, always explicit (FR-3, AC-11) ------------------
+# --- Explicit configuration, never the SDK's env fallbacks (FR-3, AC-11) --
 
 
 def test_client_is_built_with_the_configured_host_never_the_sdk_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """AC-11 plus M2-07/M2-14: every option the SDK would otherwise take
+    from a `LANGFUSE_*` environment variable and that changes behaviour or
+    trace identity is passed explicitly, so a stray shell variable on a host
+    run cannot silently redirect, unsample, or anonymise tracing."""
     constructed: list[dict[str, Any]] = []
 
     def _record(**kwargs: Any) -> str:
@@ -173,6 +177,7 @@ def test_client_is_built_with_the_configured_host_never_the_sdk_default(
 
     monkeypatch.setattr(tracing, "get_settings", lambda: _enabled_settings())
     monkeypatch.setattr(tracing, "Langfuse", _record)
+    monkeypatch.setenv("APP_VERSION", "0123456789abcdef0123456789abcdef01234567")
 
     assert tracing._get_client() == "client"
     assert constructed == [
@@ -180,8 +185,29 @@ def test_client_is_built_with_the_configured_host_never_the_sdk_default(
             "public_key": "pk-lf-test",
             "secret_key": "sk-lf-test",
             "base_url": "http://localhost:3001",
+            "tracing_enabled": True,
+            "sample_rate": 1.0,
+            "environment": "local",
+            "release": "0123456789abcdef0123456789abcdef01234567",
         }
     ]
+
+
+def test_release_is_none_when_app_version_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`APP_VERSION` is optional (`docs/contracts.md` -> Provenance ->
+    Application: git SHA when available, else null); an unset one must not
+    become the empty string the SDK would then fall back from."""
+    constructed: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(tracing, "get_settings", lambda: _enabled_settings())
+    monkeypatch.setattr(tracing, "Langfuse", lambda **kwargs: constructed.append(kwargs))
+    monkeypatch.delenv("APP_VERSION", raising=False)
+
+    tracing._get_client()
+
+    assert constructed[0]["release"] is None
 
 
 def test_langfuse_host_defaults_to_the_local_self_hosted_url(
@@ -309,20 +335,37 @@ async def test_a_span_that_fails_to_close_does_not_fail_the_turn(
         turn_span.update(output="ok")
 
 
-async def test_client_construction_failure_disables_tracing_silently(
+async def test_client_construction_failure_is_unavailable_not_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """M2-06: keys are configured, so `disabled` (contracts.md ->
+    `HealthResponse`: "no keys configured") would send an operator hunting
+    for a missing variable instead of reading the logged construction
+    error. The turn path is unaffected either way: every tracing call stays
+    a no-op and no outbound call is attempted."""
+    calls: list[str] = []
+
     def _boom(**kwargs: Any) -> Any:
+        calls.append("constructed")
         raise RuntimeError("bad credentials shape")
 
     monkeypatch.setattr(tracing, "get_settings", lambda: _enabled_settings())
     monkeypatch.setattr(tracing, "Langfuse", _boom)
 
     assert tracing._get_client() is None
-    with tracing.start_turn_trace(_trace(), input="hi") as turn_span:
+    assert tracing.current_health() == "unavailable"  # before any refresh
+
+    trace = _trace()
+    with tracing.start_turn_trace(trace, input="hi") as turn_span:
         turn_span.update(output="ok")
+        with tracing.record_generation(trace, model="m", input=[{"role": "user"}]) as generation:
+            generation.update(output="ok")
+
     await tracing.refresh_health()
-    assert tracing.current_health() == "disabled"
+    await tracing.shutdown()
+
+    assert tracing.current_health() == "unavailable"
+    assert calls == ["constructed"]  # memoized: never retried per turn
 
 
 # --- Health mapping (FR-7, AC-7, AC-10) -----------------------------------

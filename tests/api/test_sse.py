@@ -7,6 +7,7 @@ the turn's `contextvars` and timeouts (and, from M2, a turn-spanning
 Langfuse observation) depend on."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,9 +15,10 @@ from uuid import uuid4
 
 import litellm
 import pytest
+from langfuse import Langfuse
 from mana_leak_api import sse as sse_module
 from mana_leak_api.sse import sse_stream
-from mana_leak_core import gateway
+from mana_leak_core import gateway, tracing
 from mana_leak_core.contracts.enums import Route
 from mana_leak_core.contracts.errors import ErrorCode, ManaLeakError
 from mana_leak_core.contracts.events import (
@@ -26,6 +28,8 @@ from mana_leak_core.contracts.events import (
     TextDelta,
     TurnEvent,
 )
+from mana_leak_core.tracing import TraceContext
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 pytestmark = pytest.mark.anyio
 
@@ -119,6 +123,63 @@ async def test_closing_the_stream_closes_the_source_generator(
     await gen.aclose()
 
     assert cleaned_up is True
+
+
+async def test_a_disconnect_while_the_producer_is_parked_closes_the_turn_in_its_own_task(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M2-02: the client stops reading, so the producer is parked at
+    `queue.put` (not inside the generator) when the ASGI server abandons the
+    byte stream and asyncio finalises it from a *new* task. The source
+    generator must still be closed by the producer task that entered its
+    Langfuse span, otherwise `start_turn_trace`'s context manager exits in a
+    task that never entered it and OpenTelemetry logs `Failed to detach
+    context` once per aborted turn (AC-4: no tracing error on any path)."""
+    exporter = InMemorySpanExporter()
+    client = Langfuse(
+        public_key=f"pk-test-{uuid4().hex}",
+        secret_key=f"sk-test-{uuid4().hex}",
+        base_url="http://localhost:3001",
+        span_exporter=exporter,
+    )
+    monkeypatch.setattr(tracing, "_get_client", lambda: client)
+    trace = TraceContext(conversation_id=uuid4(), turn_id=uuid4(), route=Route.other)
+    ids = {"conversation_id": trace.conversation_id, "turn_id": trace.turn_id}
+    closed_in: list[asyncio.Task[None] | None] = []
+
+    async def events() -> AsyncIterator[TurnEvent]:
+        # The same shape as `orchestrator._run_turn`: one span around the
+        # whole generator body, opened and closed inside it.
+        with tracing.start_turn_trace(trace, input="why does this work?"):
+            try:
+                yield MessageStart(message_id=uuid4(), **ids)
+                while True:
+                    yield TextDelta(delta="partial", **ids)
+            finally:
+                closed_in.append(asyncio.current_task())
+
+    try:
+        caplog.set_level(logging.ERROR)
+        gen = sse_stream(events())
+        assert (await anext(gen)).startswith(b"event: message_start\ndata: ")
+        # Stop reading: one event sits in the queue (maxsize=1) and the
+        # producer blocks putting the next one.
+        await asyncio.sleep(0.05)
+
+        await asyncio.create_task(gen.aclose())  # asyncio's asyncgen finalizer
+
+        detach_errors = [
+            record
+            for record in caplog.records
+            if "detach" in record.getMessage().lower() or "detach" in record.name
+        ]
+        assert detach_errors == []
+        assert closed_in and closed_in[0] is not asyncio.current_task()
+        client.flush()
+        turn = [span for span in exporter.get_finished_spans() if span.name == str(trace.turn_id)]
+        assert len(turn) == 1 and turn[0].end_time is not None
+    finally:
+        client.shutdown()
 
 
 # --- One producer task per turn, from the first event (F1) -------------------

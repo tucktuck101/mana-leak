@@ -91,7 +91,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
@@ -179,21 +179,32 @@ async def _audit_limit_reached(limit: str, value: int) -> None:
     )
 
 
-def check_no_secrets(messages: Sequence[dict[str, str]], settings: Settings) -> None:
+def check_no_secrets(messages: Sequence[Mapping[str, Any]], settings: Settings) -> None:
     """Fail closed if any configured secret value appears in `messages`
     (module docstring -> Secret redaction). `complete()` calls this before
     the model call and before any generation observation; `_run_turn`
     calls it on the user message before opening the turn trace, so no
     secret-bearing content reaches Langfuse at all (M2 PRD NFR-2, AC-8).
-    Raises `ManaLeakError(internal_error)` without echoing the secret."""
+    Raises `ManaLeakError(internal_error)` without echoing the secret.
+
+    `content` is searched as text whatever its shape (M2-12): a message
+    whose `content` is a list of multimodal/tool blocks, as the chat
+    protocol allows and tool calls will produce, would otherwise turn
+    `secret in content` into a *list membership* test -- a secret inside a
+    block would pass, which is exactly the fail-open this check exists to
+    prevent. `str()` (not `json.dumps`) is the normalisation, because its
+    output escapes nothing: a secret containing a newline, a quote or a
+    non-ASCII character still matches as a substring.
+    """
     secrets = [
         value.get_secret_value()
         for _name, value in settings
         if isinstance(value, SecretStr) and value.get_secret_value()
     ]
     for message in messages:
-        content = message.get("content") or ""
-        if any(secret in content for secret in secrets):
+        content = message.get("content")
+        text = content if isinstance(content, str) else str(content)
+        if any(secret in text for secret in secrets):
             logger.error("outbound message blocked: contains a configured secret value")
             raise ManaLeakError(
                 ErrorCode.internal_error,

@@ -218,7 +218,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 1s
+      # First boot on a fresh volume initialises ClickHouse's data dir and can take several
+      # minutes on a slow disk; failed checks inside start_period don't count, so `up` doesn't
+      # abort the Langfuse services (found by the M2-01 fresh-volume check).
+      start_period: 300s
 
   redis:
     image: docker.io/redis:7
@@ -248,7 +251,7 @@ services:
       interval: 1s
       timeout: 5s
       retries: 5
-      start_period: 1s
+      start_period: 120s
 
 volumes:
   postgres-data:

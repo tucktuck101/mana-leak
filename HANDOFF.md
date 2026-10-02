@@ -1,10 +1,10 @@
 Mode: AFK (user away; resume normal mode when the user says they're back). Decisions normally put to the user are made by a Fable stand-in agent and logged in afk-decisions.md (gitignored, repo root). At least one Fable review at every gate, then judge whether another round is needed.
 
-Current activity: M3 — Cards. Deriving docs/prds/M3-cards.md.
+Current activity: M3 — Cards. PRD drafted (docs/prds/M3-cards.md, Proposed; 17 FR / 7 NFR / 27 AC). Fable PRD review + Fable stand-in decisions (2 open issues) running.
 
 Done: M1 Complete. M2 Complete (bd77630): Langfuse self-hosted, fresh-volume boot verified, make e2e passes.
 
-In flight: M3 PRD author agent.
+In flight: agents M3PRDReview, M3StandIn.
 
 Waiting on user: nothing (AFK).
 

@@ -196,6 +196,41 @@ Waiting was a large, mostly invisible cost:
   outside the repo.
 - **The stack:** the full stack is still running locally.
 
+## Lessons learned
+
+These are the developer's own takeaways, paraphrased.
+
+**Don't get stuck in the design phase.** The first six hours went on design
+documents and three rounds of review before any application code existed. The
+design held up, but most of what it settled could have been worked out during
+M1 and M2 with real code to test against. A short design pass, then a running
+skeleton, is a better trade-off at this timescale.
+
+**Agentic review gates are worth having, but they cost more time than this
+project had.** The gates caught real failures that agents produce: tests that
+pass vacuously, contracts that drift between lanes, context lost across task
+boundaries, and secrets showing up in tool output. Those would have been
+expensive to find later. But each gate took 6–26 minutes, and there were
+several per milestone. In a 24-hour build that overhead competes directly with
+building features. The value is real; the frequency needs to match the time
+available.
+
+**"Simpler" still wasn't small enough.** The intent was a narrower project that
+applied what the course had covered, using the Jobfinder app as a reference for
+its shape. The misjudgement was the size. Card search, combo lookup, rules
+retrieval, a stateful judge, evaluation, observability, safeguards and three
+interfaces form a full product, not a 24-hour slice. Even with CLI and MCP cut
+to a stretch goal, ten milestones were never going to fit. A project for this
+window needs to be one or two of those capabilities at most.
+
+**Mana Leak won't be developed further.** It's an interesting app, and there's
+plenty of open data to build on: card databases, rulings, combos and prices.
+But plenty of existing apps already cover this space, so there's no strong
+reason to keep going. The value of the exercise was the process: the agent
+operating model, workmux orchestration, review gates, and what the e2e and
+browser checks caught. That carries over to the next project. The product
+doesn't need to.
+
 ## If doing it again
 
 - Cap design review at one round before code, and let PRDs and milestone

@@ -146,7 +146,7 @@ Resolution order (deterministic):
 
 1. Parses as UUID → lookup by `oracle_id`.
 2. Exact `name_normalized` match → `found`/`exact_name` (if more than one row matches, `ambiguous`).
-3. Exact match in `face_names_normalized` → `found`/`face_name`.
+3. Exact match in `face_names_normalized` → `found`/`face_name` (if more than one row matches, `ambiguous`).
 4. Trigram similarity ≥ 0.6: a single best match with a margin of at least 0.1 over the runner-up → `found`/`fuzzy`; several close matches → `ambiguous`; none → `not_found`.
 
 A `fuzzy` match is never silently treated as exact. Callers show `match` to the user ("Did you mean …"), and the judge treats it as an identified card only when `match != "fuzzy"` or the user confirms it.
@@ -660,7 +660,7 @@ class IngestReport(BaseModel):
 6. Execute the route:
    - `cards` / `combos`: bounded tool loop with streamed text;
    - `judge`: `judge()`, reusing the turn's ledger;
-   - `other`: a single short model answer steering the user back to cards/combos/rules questions, with no tools.
+   - `other`: a single short model answer steering the user back to cards/combos/rules questions, with no tools (the steering names only the capabilities shipped so far — cards from M3, combos from M4, rules from M5).
 7. Persist tool messages and the assistant message (`payload` = `TurnResult`).
 8. Emit `final`, then `message_end`.
 
@@ -671,7 +671,7 @@ Because CLI `judge` and MCP `judge` run through this same `process_turn`, their 
 ```python
 class CardsResult(BaseModel):
     kind: Literal["cards"] = "cards"
-    cards: list[CardSummary]                # cards referenced in the answer
+    cards: list[Card]                     # cards the answer refers to — selected by code, rule below
 
 class CombosResult(BaseModel):
     kind: Literal["combos"] = "combos"
@@ -680,6 +680,8 @@ class CombosResult(BaseModel):
 TurnResult = Annotated[CardsResult | CombosResult | Ruling | NeedMoreInformation | RulesExplanation | RuleText,
                        Field(discriminator="kind")]
 ```
+
+`CardsResult.cards` is chosen by code, never by the model: eligible cards are every card an `ok` tool result returned during the turn (`CardFound.card`, `CardAmbiguous.candidates`, `search_cards` items); a card is selected when its full `name` or any face name occurs in the final assistant text as a case-insensitive whole-word match after whitespace normalisation; selected cards are de-duplicated by `oracle_id`, ordered by first occurrence in the text, and loaded as full `Card` rows. A card no tool returned is never included; a text naming none yields `cards=[]`.
 
 `other`-route answers and refusals have `result = None`.
 
@@ -746,7 +748,8 @@ data: <TurnEvent JSON on one line>
 | GET | `/conversations/{conversation_id}` | — | `ConversationDetail` |
 | POST | `/conversations/{conversation_id}/messages` | `{ "content": str?, "action": "answer" \| "new_question" \| "end_session"? }` | `200 text/event-stream` of `TurnEvent` |
 | POST | `/cards/search` | `CardSearchRequest` | `list[CardSummary]` |
-| GET | `/cards/{identifier}` | path: name, face name, or UUID (URL-encoded); names containing `/` (split cards) should use `GET /cards?identifier=` instead | `CardLookupResult`, always 200 — `kind` discriminates found/not_found/ambiguous; this is a value, not an error (Principles → Failures are values) |
+| GET | `/cards/{identifier}` | path: name, face name, or UUID (URL-encoded); names containing `/` (split cards) use `GET /cards?identifier=` instead (below) | `CardLookupResult`, always 200 — `kind` discriminates found/not_found/ambiguous; this is a value, not an error (Principles → Failures are values) |
+| GET | `/cards?identifier=` | query: name (including ` // ` for split/adventure/MDFC full names), face name, or UUID (URL-encoded) | `CardLookupResult`, identical semantics to the path form |
 | POST | `/combos/search` | `ComboSearchRequest` | `ComboSearchResult` |
 | POST | `/combos/find` | `ComboFindRequest` | `ComboFindResult` |
 | GET | `/combos/{combo_id}` | — | `ComboGetResult` |
@@ -967,8 +970,9 @@ Two mechanisms protect the final answer despite retries:
 
 ### Scryfall ingestion
 
-- **Input:** the Scryfall bulk-data `oracle_cards` entry from `https://api.scryfall.com/bulk-data`: a gzipped JSONL archive at its `jsonl_download_uri` (not `download_uri`), downloaded to `data/scryfall/` and streamed/decompressed during ingest. Every request to `api.scryfall.com` sends explicit `User-Agent` and `Accept: application/json` headers; the HTTP client must not fall back to library defaults for either.
-- **Output:** upserted `card` rows (layout exclusions and field mapping in `data-model.md`), `source_version` = bulk `updated_at`. Ingestion only; no runtime Scryfall calls.
+- **Input:** the Scryfall bulk-data `oracle_cards` entry from `https://api.scryfall.com/bulk-data`: a gzipped JSONL archive at its `jsonl_download_uri` (not `download_uri`), downloaded to `data/scryfall/` under its upstream basename and streamed/decompressed during ingest. Every request to `api.scryfall.com` sends explicit `User-Agent` and `Accept: application/json` headers; the HTTP client must not fall back to library defaults for either.
+- **Output:** upserted `card` rows (layout exclusions and field mapping in `data-model.md`), `source_version` = the archive's Scryfall timestamp normalised to `YYYY-MM-DDTHH:MM:SSZ` (listing `updated_at` truncated to seconds when fetched; the `oracle-cards-YYYYMMDDHHMMSS` filename stamp when `--file` is given — the same instant). The fetched archive is saved under its upstream basename; a `--file` whose basename lacks the stamp is rejected as `validation_error` before any read. Ingestion only; no runtime Scryfall calls.
+- The web UI credits Scryfall as the card-data source in a single site-wide footer notice — "Card data provided by Scryfall" linking to `https://scryfall.com`, alongside the Wizards of the Coast Fan Content Policy unofficial-content notice — not per card or per message; `CardSummary`/`Card` carry no Scryfall link (mirrors the Commander Spellbook credit, External adapters → Commander Spellbook, below).
 
 ### Commander Spellbook
 
@@ -1004,12 +1008,13 @@ The parser turns the official TXT into `list[ParsedRuleChunk]` (chunking rules i
 
 ```python
 async def complete(messages, *, model: str, tools: list[ToolSpec] | None = None,
+                   tool_choice: Literal["auto", "required"] | None = None,
                    response_model: type[BaseModel] | None = None, stream: bool = False,
                    max_tokens: int = 1500, trace: TraceContext | None = None) -> ModelResponse | AsyncIterator[ModelChunk]
 async def embed(texts: list[str], *, model: str) -> list[list[float]]
 ```
 
-This is the only module that imports LiteLLM. It applies timeouts, retries, structured-output parsing (`response_model`), and Langfuse metadata, and increments the per-turn model-call counter that Operational limits defines, raising `model_limit_exceeded` at the cap.
+This is the only module that imports LiteLLM. It applies timeouts, retries, structured-output parsing (`response_model`), and Langfuse metadata, and increments the per-turn model-call counter that Operational limits defines, raising `model_limit_exceeded` at the cap. `tool_choice` is forwarded to LiteLLM only when `tools` is given; omitted or `None` leaves the provider default.
 
 ### Langfuse
 
@@ -1158,7 +1163,7 @@ class AuditEventType(StrEnum):
 | Models | LiteLLM model ID string | `ruling.model`, `eval_run.model`/`config` |
 | Embedding model | `EMBEDDING_MODEL` | `rule_chunk.embedding_model`, `eval_run.config` |
 | Rules | effective date `YYYY-MM-DD` | `rule_chunk.rules_version`, `ruling.rules_version` |
-| Cards | Scryfall bulk `updated_at` | `card.source_version`, `ruling.card_source_version` |
+| Cards | Scryfall bulk timestamp normalised to `YYYY-MM-DDTHH:MM:SSZ` (listing `updated_at` on fetch, filename stamp on `--file`) | `card.source_version`, `ruling.card_source_version` |
 | Combos | Spellbook bulk-export `version` string (recorded when building fixtures — the live API root carries no `version` field) or `retrieved_at` date for live data; `fixture-<date>` for fixtures | `combo.source_version`, `ComboCitation.source_version` |
 | Eval fixtures | dataset revision or authoring date | `eval_case.source_version` |
 

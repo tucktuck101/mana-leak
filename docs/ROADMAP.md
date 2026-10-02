@@ -682,3 +682,13 @@ Design review gate closed after round 3 with remaining MINOR findings logged as 
 - M3 — M2-11: keep every `complete()` call sequential in the SSE producer task; parallelise only non-model tool I/O.
 - M7 — DOC-213: specify the event/persistence shape of an explicit "End session" turn with no user content (does it persist an assistant message? does `Final` carry session status for the UI indicator?).
 - S1 — DOC-211: on CLI/MCP, `end_session` currently behaves identically to `new_question` (both require and act on `question`); make `question` optional for `end_session`, and decide whether REST needs an explicit `answer` action for CLI/MCP parity.
+
+### M3 PRD decisions (AFK stand-in, 2026-10-02)
+
+1. `get_card` lookup step 3 (face-name match) now reports `ambiguous` when more than one card shares a face name, mirroring step 2 (`contracts.md`).
+2. Card import exclusions extended beyond layouts (`front_card`; `memorabilia`/`token` set types; `playtest` promos; `Card`/`Token…` type lines) after the live bulk showed 23 Commander-legal staples colliding by exact name; Un-cards stay (`data-model.md`).
+3. A `GET /cards?identifier=` query-string lookup variant was added alongside the existing path form, for names containing `/` such as split cards (`contracts.md`).
+4. Card `source_version` is the Scryfall bulk timestamp normalised to `YYYY-MM-DDTHH:MM:SSZ`, taken from the listing on fetch or the filename stamp on `--file`; the archive carries no `updated_at` (`contracts.md`, `data-model.md`).
+5. `CardsResult.cards` widened from `list[CardSummary]` to `list[Card]` so the browser shows authoritative Oracle text and faces, selected by a deterministic code rule (name/face-name match in the final answer text, never the model); the tool loop's first call forces `tool_choice="required"` (`contracts.md`).
+6. The `other` route's steering text names only shipped capabilities (cards from M3, combos from M4, rules from M5) (`contracts.md`).
+7. Scryfall attribution ships as a single site-wide footer credit (not per-card); noted under External adapters → Scryfall ingestion, mirroring the existing Commander Spellbook credit (`contracts.md`).

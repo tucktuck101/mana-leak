@@ -60,7 +60,7 @@ Every externally sourced table carries these columns directly; there is no share
 | `source` | text, not null | `scryfall`, `commander_spellbook`, `comprehensive_rules`, `mtg_qa`, or `hand_authored` |
 | `source_id` | text, null | Upstream record identifier (when distinct from the primary key) |
 | `source_url` | text, null | Canonical URL of the record or document |
-| `source_version` | text, not null | Upstream version: bulk-data `updated_at`, rules effective date, dataset revision, or `fixture-<date>` |
+| `source_version` | text, not null | Upstream version: bulk-data `updated_at` normalised to `YYYY-MM-DDTHH:MM:SSZ`, rules effective date, dataset revision, or `fixture-<date>` |
 | `retrieved_at` | timestamptz, not null | When Mana Leak fetched or imported it |
 
 Importers must fail rather than write external data without `source`, `source_version`, and `retrieved_at`.
@@ -69,7 +69,7 @@ Importers must fail rather than write external data without `source`, `source_ve
 
 ### `card`
 
-One row per logical Oracle card (Scryfall `oracle_id`), not per printing. Imported from the Scryfall *Oracle Cards* bulk file. Import excludes non-game objects (layouts `token`, `double_faced_token`, `emblem`, `art_series`, `vanguard`, `scheme`, `planar`).
+One row per logical Oracle card (Scryfall `oracle_id`), not per printing. Imported from the Scryfall *Oracle Cards* bulk file. Import excludes non-game objects: layouts `token`, `double_faced_token`, `emblem`, `art_series`, `vanguard`, `scheme`, `planar`, `front_card`; records whose `set_type` is `memorabilia` or `token`; records whose `promo_types` contains `playtest` (Mystery Booster / Unknown Event playtest cards reuse real card names with inserted punctuation and collide under `name_normalized`); and records whose `type_line` is exactly `Card` or begins with `Token`. Other Un-set cards stay. Excluded records count toward `IngestReport.skipped`. Verified against the 2026-10-01 bulk: 33,827 rows remain and no `name_normalized` collision involves a Commander-legal card; remaining collisions are same-name variants within Un-sets, which lookup reports as `ambiguous`.
 
 **`oracle_id` is the stable logical-card key.** Print-specific Scryfall `id`s are not stored.
 
@@ -92,7 +92,7 @@ One row per logical Oracle card (Scryfall `oracle_id`), not per printing. Import
 | `legal_commander` | text | no | Scryfall `legalities.commander`: `legal`, `not_legal`, `banned`, `restricted` |
 | `scryfall_uri` | text | no | Link for display |
 | `search_tsv` | tsvector | no | Generated column: `to_tsvector('english', name || ' ' || type_line || ' ' || oracle_text)` |
-| provenance | | | `source='scryfall'`, `source_id` = Scryfall card `id` of the representative printing, `source_url`, `source_version` = bulk `updated_at`, `retrieved_at` |
+| provenance | | | `source='scryfall'`, `source_id` = Scryfall card `id` of the representative printing, `source_url`, `source_version` = bulk timestamp as `YYYY-MM-DDTHH:MM:SSZ` (`contracts.md` → Scryfall ingestion), `retrieved_at` |
 | `imported_at` | timestamptz | no | When this row was last upserted |
 
 Not stored: prices, printings, sets, artwork, rulings text, ownership, EDHREC data.

@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved
+Complete
 
 Review: Fable single pass 2026-10-01 — 7 MAJOR / 7 MINOR / 3 NIT; all applied.
 

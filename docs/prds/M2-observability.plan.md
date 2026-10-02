@@ -4,7 +4,7 @@ PRD: [`M2-observability.md`](M2-observability.md) (Approved). This plan says **h
 
 ## Status
 
-Approved (user, 2026-10-01). Wave 1 dispatched.
+Complete (2026-10-02).
 
 Review: Fable single pass 2026-10-01 — 9 MAJOR / 8 MINOR / 3 NIT; all applied (F8: fail closed, user decision).
 
@@ -239,4 +239,7 @@ M2 is `Complete` only when the PRD's completion condition (§14) holds:
 - 2026-10-02: `/health` reports `langfuse: ok` with the stack up. The orchestrator logged into the Langfuse UI (headless-provisioned user, read from `.env` without printing). The login stayed on port 3001, sessions are listed per conversation, and the Tracing view shows one root trace per turn with the user's input and the model's output.
 - 2026-10-02: doc-sync step done: `contracts.md` gateway signature and `/health` wording corrected, deviations recorded in ROADMAP.
 - `make test`: 173 pytest + 19 vitest pass; `make lint` clean.
-- Pending: `AGENTS.md` §49a milestone → Complete review gate.
+- 2026-10-02: §49a milestone gate (Fable, round 1): 1 MAJOR, 10 MINOR, 5 NIT. Fixed: SSE generator closed in its producer task (no detach error on disconnect), Langfuse client hardening (construction failure → unavailable, tracing_enabled/sample_rate/environment/release pinned), non-str content in the secret check, hermetic tests (no shell LANGFUSE_* leakage), narrowed `/health` wording, both key paths documented, dead MinIO media endpoint removed. M2-08..11 carried to M3 Open PRD inputs. The user waived a second review round.
+- 2026-10-02: M2-01 fresh-volume boot (`docker compose down -v`, `up --build -d`) first failed: ClickHouse's 51 s health window was too short for first-time initialisation, so `up` aborted the Langfuse services and web. Fixed in f2fe8e1 (ClickHouse `start_period: 300s`, MinIO `120s`). Re-run: all 8 services healthy from empty volumes, `/health` `langfuse: ok`.
+- 2026-10-02: FR-8: `docker compose up -d postgres api web` alone reaches healthy, answers a turn through the proxy, and reports `langfuse: unavailable`.
+- 2026-10-02: final `make e2e` on the fresh stack passes; `make test` 176 pytest + 19 vitest; `make lint` clean. M2 Complete.

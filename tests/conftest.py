@@ -1,4 +1,4 @@
-"""Shared pytest fixtures (AGENTS.md boundary file, WP1).
+"""Shared pytest fixtures (AGENTS.md boundary file, WP1; M2-03 fix).
 
 `db` targets a per-worktree schema (`test_<slug>`, `<slug>` derived from this
 worktree's own checkout-directory name) inside the shared `mana_leak_test`
@@ -10,6 +10,14 @@ exists (added by WP2), and every table inside it is truncated after each test
 that uses it. The schema is dropped at session end. If `mana_leak_test` is
 unreachable (Postgres not running locally), DB-backed tests are skipped, not
 failed.
+
+`_langfuse_env_isolated` (autouse) strips `LANGFUSE_PUBLIC_KEY`/
+`LANGFUSE_SECRET_KEY` from the process environment and resets
+`mana_leak_core.tracing`'s module-level client/health caches before and
+after every test in the suite, so no test anywhere can build a real
+Langfuse client (and export spans over the network) from a developer's own
+shell environment (M2-03). Tests that need tracing enabled opt back in
+explicitly inside the test body.
 """
 
 import logging
@@ -21,6 +29,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from mana_leak_core import tracing
 from mana_leak_core.settings import get_settings
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -34,6 +43,52 @@ logger = logging.getLogger(__name__)
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _langfuse_env_isolated() -> Generator[None]:
+    """No test can build a real Langfuse client from the developer's shell
+    (M2 plan, Execution model: "no test depends on `.env` for Langfuse
+    configuration"). `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are the only
+    two variables `tracing.py`'s client construction reads from `Settings`
+    (`.env` itself never carries them -- only the Compose-only
+    `LANGFUSE_INIT_*` pair does); strip them from the ambient process
+    environment (e.g. an unrelated shell/sandbox's own observability config)
+    before every test in the whole suite, and reset `get_settings`'s and
+    `tracing`'s module-level caches so a leftover client/health state never
+    leaks between tests. Tests that need tracing enabled opt back in
+    explicitly inside the test body, e.g. `tests/core/test_turn.py`'s
+    `real_langfuse_client` fixture (`monkeypatch.setenv(...)`), never by
+    relying on a key pair already present in the environment.
+
+    Deliberately plain `os.environ` save/restore, not the `monkeypatch`
+    fixture: requesting `monkeypatch` here would make *this* autouse
+    fixture the first thing to instantiate it for the test, which flips
+    `monkeypatch`'s own finalizer to run before sibling autouse fixtures
+    that don't depend on it (e.g. `tests/core/conftest.py`'s
+    `_reset_tracing_cache`) instead of after -- those fixtures then run
+    their teardown against a still-monkeypatched `tracing._get_client`
+    (e.g. `span_capture_factory`'s lambda), which has no `cache_clear`.
+    Plain `os.environ` mutation participates in no such ordering.
+    """
+    langfuse_keys = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+    saved = {name: os.environ.pop(name, None) for name in langfuse_keys}
+    get_settings.cache_clear()
+    tracing._get_client.cache_clear()
+    tracing._health = None
+    yield
+    for name, value in saved.items():
+        if value is not None:
+            os.environ[name] = value
+    get_settings.cache_clear()
+    # `_get_client` may still be a test's own monkeypatched callable here --
+    # `monkeypatch`'s own teardown (a different fixture, instantiated and
+    # torn down entirely within whichever test/fixture actually requested
+    # it) restores the real `lru_cache`d function -- so only clear the real
+    # function's cache if it is still the one installed.
+    if hasattr(tracing._get_client, "cache_clear"):
+        tracing._get_client.cache_clear()
+    tracing._health = None
 
 
 def _worktree_schema() -> str:

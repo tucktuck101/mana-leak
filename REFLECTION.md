@@ -194,7 +194,7 @@ Waiting was a large, mostly invisible cost:
   `MANA_LEAK_DB_PASSWORD` (exposed once).
 - **Review evidence:** reports and stand-in decisions are in `~/.omp-tmp/`,
   outside the repo.
-- **The stack:** the full stack is still running locally.
+- **The stack:** stopped (`docker compose down`); data volumes kept.
 
 ## Lessons learned
 

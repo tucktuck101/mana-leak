@@ -676,5 +676,9 @@ Design review gate closed after round 3 with remaining MINOR findings logged as 
 
 **Open PRD inputs** (unresolved MINOR findings from the round-3 report `mana-leak-review-r3.md`; for the owning PRD to settle):
 - M5 — DOC-205: decide whether the retrieval evaluation suite exercises the judge's internal composed query, the public `search_rules` path, or both; the two retrieve differently.
+- M3 — M2-08 (M2 milestone review): the route is only known after the router's own generation, which must still be a child of the turn trace. Update the turn span's route after routing, and make `TraceContext.route` `None` until it's decided.
+- M3 — M2-09: router, tool-loop and final-answer generations all share the model name. Add a `tracing.start_span(name, *, input=None, as_type="span"|"tool")` helper so the router, each tool call and the final answer are distinguishable in the trace.
+- M3 — M2-10: tool-call responses record an empty `output` and lose `tool_calls`. Extend `ModelChunk`/`ModelResponse` with `tool_calls` and record `{content, tool_calls}` as the generation output.
+- M3 — M2-11: keep every `complete()` call sequential in the SSE producer task; parallelise only non-model tool I/O.
 - M7 — DOC-213: specify the event/persistence shape of an explicit "End session" turn with no user content (does it persist an assistant message? does `Final` carry session status for the UI indicator?).
 - S1 — DOC-211: on CLI/MCP, `end_session` currently behaves identically to `new_question` (both require and act on `question`); make `question` optional for `end_session`, and decide whether REST needs an explicit `answer` action for CLI/MCP parity.
